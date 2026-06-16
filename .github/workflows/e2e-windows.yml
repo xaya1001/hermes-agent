@@ -166,7 +166,7 @@ jobs:
         run: |
           $installDir = "$env:HERMES_HOME\hermes-agent"
           New-Item -ItemType Directory -Path $installDir -Force
-          Get-ChildItem -Path ${{ github.workspace }} -Force | Move-Item -Destination $installDir -Force
+          Get-ChildItem -Path ${{ github.workspace }}\source -Force | Move-Item -Destination $installDir -Force
           Write-Host "Isolated install dir ready: $installDir"
 
       # ── Screen recording for coordinate discovery ───────────────────
