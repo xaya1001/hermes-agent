@@ -55,10 +55,10 @@ ToolTip(Format("Installer window appeared at x={1} y={2} w={3} h={4}. Sleeping f
 Sleep(3000)
 
 ; click install
-clickX := (x + 448)
+clickX := (x + (w / 2))
 clickY := (y + 418)
 
-ClickWithMarker(x, y)
+ClickWithMarker(clickX, clickY)
 
 Sleep(2000)
 ToolTip("Done")
