@@ -22,6 +22,53 @@ export const $projectTreeLoading = atom(false)
 // Session ids claimed by any project, so the flat Recents list can exclude them
 // (one membership set, straight from the backend tree).
 export const $scopedSessionIds = atom<Set<string>>(new Set())
+
+// Client-side cache eviction (Apollo-style optimistic layer): ids the user just
+// deleted/archived. The backend tree is a snapshot that still lists them until
+// its next refresh, so the render-time overlay strips these so the tree matches
+// the live `$sessions` cache exactly — same as the flat Recents list. Pruned on
+// refresh once the server snapshot has caught up.
+export const $removedSessionIds = atom<Set<string>>(new Set())
+
+export function tombstoneSessions(ids: Array<null | string | undefined>): void {
+  const next = new Set($removedSessionIds.get())
+  const before = next.size
+
+  for (const id of ids) {
+    const trimmed = id?.trim()
+
+    if (trimmed) {
+      next.add(trimmed)
+    }
+  }
+
+  if (next.size !== before) {
+    $removedSessionIds.set(next)
+  }
+}
+
+export function untombstoneSessions(ids: Array<null | string | undefined>): void {
+  const current = $removedSessionIds.get()
+
+  if (!current.size) {
+    return
+  }
+
+  const next = new Set(current)
+
+  for (const id of ids) {
+    const trimmed = id?.trim()
+
+    if (trimmed) {
+      next.delete(trimmed)
+    }
+  }
+
+  if (next.size !== current.size) {
+    $removedSessionIds.set(next)
+  }
+}
+
 // True while the disk scan is in flight (drives the "finding repos" hint).
 export const $reposScanning = atom(false)
 
@@ -103,9 +150,24 @@ export async function refreshProjectTree(): Promise<void> {
   $projectTreeLoading.set(true)
   try {
     const res = await gatewayRequest<ProjectTreePayload>('projects.tree', { preview_limit: 3 })
+    const scoped = new Set(res.scoped_session_ids ?? [])
+
     $projectTree.set(res.projects ?? [])
-    $scopedSessionIds.set(new Set(res.scoped_session_ids ?? []))
+    $scopedSessionIds.set(scoped)
     $activeProjectId.set(res.active_id ?? null)
+
+    // Reconcile the optimistic eviction layer against the fresh snapshot: keep
+    // evicting ids the server still lists (delete in flight) and drop the rest
+    // (server caught up), so the set can't grow unbounded across a long session.
+    const tombstones = $removedSessionIds.get()
+
+    if (tombstones.size) {
+      const pending = new Set([...tombstones].filter(id => scoped.has(id)))
+
+      if (pending.size !== tombstones.size) {
+        $removedSessionIds.set(pending)
+      }
+    }
   } catch {
     // Backend may not be ready; keep the last known tree.
   } finally {
@@ -181,6 +243,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
   })
 
   await refreshProjects()
+  await refreshProjectTree()
 
   return res.project
 }
@@ -188,6 +251,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
 export async function renameProject(id: string, name: string): Promise<void> {
   await gatewayRequest('projects.update', { id, name })
   await refreshProjects()
+  await refreshProjectTree()
 }
 
 export async function addProjectFolder(
@@ -202,10 +266,12 @@ export async function addProjectFolder(
     is_primary: opts.isPrimary ?? false
   })
   await refreshProjects()
+  await refreshProjectTree()
 }
 
 export async function deleteProject(id: string): Promise<void> {
   applyPayload(await gatewayRequest<ProjectsPayload>('projects.delete', { id }))
+  await refreshProjectTree()
 }
 
 export async function setActiveProject(id: null | string): Promise<void> {

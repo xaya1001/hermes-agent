@@ -275,6 +275,105 @@ describe('overlayLiveLanes', () => {
 
     expect(overlaid.repos[0].groups.flatMap(g => g.sessions.map(s => s.id))).toEqual(['dup'])
   })
+
+  it('adds a new session to an existing worktree lane keyed by a divergent id (matches by path)', () => {
+    // Backend keyed the worktree lane off a branch-style id (no live git probe),
+    // but the lane PATH is the worktree dir. A new session under that worktree
+    // must join the existing lane, not spawn a twin.
+    const existing = makeSession('/www/app/.worktrees/baby', { id: 'old' })
+    const project = projectNode({
+      id: '/www/app',
+      repos: [
+        {
+          id: '/www/app',
+          label: 'app',
+          path: '/www/app',
+          sessionCount: 1,
+          groups: [
+            lane({ id: '/www/app::branch::baby', label: 'baby', path: '/www/app/.worktrees/baby', sessions: [existing] })
+          ]
+        }
+      ]
+    })
+    const fresh = makeSession('/www/app/.worktrees/baby', { id: 'fresh' })
+
+    const overlaid = overlayLiveLanes(project, [existing, fresh])
+    const lanes = overlaid.repos[0].groups.filter(g => g.path === '/www/app/.worktrees/baby')
+
+    expect(lanes).toHaveLength(1)
+    expect(lanes[0].sessions.map(s => s.id).sort()).toEqual(['fresh', 'old'])
+  })
+
+  it('places a session into an out-of-tree (sibling) worktree lane by its path', () => {
+    // `hermes-agent-ci` is a linked worktree living BESIDE the repo, not under
+    // it — repo-root nesting fails, but the existing lane carries its real path.
+    const existing = makeSession('/www/app-ci', { id: 'old' })
+    const project = projectNode({
+      id: '/www/app',
+      repos: [
+        {
+          id: '/www/app',
+          label: 'app',
+          path: '/www/app',
+          sessionCount: 1,
+          groups: [
+            lane({ id: '/www/app::branch::main', label: 'main', isMain: true, path: '/www/app', sessions: [] }),
+            lane({ id: '/www/app-ci', label: 'app-ci', path: '/www/app-ci', sessions: [existing] })
+          ]
+        }
+      ]
+    })
+    const fresh = makeSession('/www/app-ci', { id: 'fresh' })
+
+    const overlaid = overlayLiveLanes(project, [existing, fresh])
+    const ci = overlaid.repos[0].groups.find(g => g.path === '/www/app-ci')
+    const main = overlaid.repos[0].groups.find(g => g.label === 'main')
+
+    expect(ci?.sessions.map(s => s.id).sort()).toEqual(['fresh', 'old'])
+    expect(main?.sessions ?? []).toHaveLength(0)
+  })
+
+  it('places into a visual-only discovered worktree lane after merge', () => {
+    const discovered = [{ path: '/www/app-retry', branch: 'bb/ci-install-retry', isMain: false, detached: false, locked: false }]
+    const groups = mergeRepoWorktreeGroups({ id: '/www/app', path: '/www/app', groups: [] }, discovered)
+    const project = projectNode({
+      id: '/www/app',
+      repos: [{ id: '/www/app', label: 'app', path: '/www/app', sessionCount: 0, groups }]
+    })
+    const fresh = makeSession('/www/app-retry', { id: 'fresh' })
+
+    const overlaid = overlayLiveLanes(project, [fresh])
+    const lane = overlaid.repos[0].groups.find(g => g.path === '/www/app-retry')
+
+    expect(lane?.sessions.map(s => s.id)).toEqual(['fresh'])
+  })
+
+  it('evicts a deleted/archived snapshot row (and drops the lane once empty)', () => {
+    const a = makeSession('/www/app', { id: 'keep', git_branch: 'main' })
+    const b = makeSession('/www/app/.worktrees/baby', { id: 'gone' })
+    const project = projectNode({
+      id: '/www/app',
+      repos: [
+        {
+          id: '/www/app',
+          label: 'app',
+          path: '/www/app',
+          sessionCount: 2,
+          groups: [
+            lane({ id: '/www/app::branch::main', label: 'main', isMain: true, path: '/www/app', sessions: [a] }),
+            lane({ id: '/www/app/.worktrees/baby', label: 'baby', path: '/www/app/.worktrees/baby', sessions: [b] })
+          ]
+        }
+      ]
+    })
+
+    // No live rows (both deleted from $sessions); only 'gone' is tombstoned.
+    const overlaid = overlayLiveLanes(project, [a], new Set(['gone']))
+
+    expect(overlaid.repos[0].groups.map(g => g.id)).toEqual(['/www/app::branch::main'])
+    expect(overlaid.repos[0].groups[0].sessions.map(s => s.id)).toEqual(['keep'])
+    expect(overlaid.sessionCount).toBe(1)
+  })
 })
 
 describe('overlayLivePreviews', () => {
@@ -288,5 +387,19 @@ describe('overlayLivePreviews', () => {
     const previews = overlayLivePreviews([project], live, [], 3)
 
     expect(previews['/www/app'].map(s => s.id)).toEqual(['fresh', 'old'])
+  })
+
+  it('evicts a deleted session from a project preview (snapshot + live)', () => {
+    const project = projectNode({
+      id: '/www/app',
+      previewSessions: [
+        makeSession('/www/app', { id: 'gone', started_at: 5, last_active: 5 }),
+        makeSession('/www/app', { id: 'old', started_at: 1, last_active: 1 })
+      ]
+    })
+
+    const previews = overlayLivePreviews([project], [], [], 3, new Set(['gone']))
+
+    expect(previews['/www/app'].map(s => s.id)).toEqual(['old'])
   })
 })

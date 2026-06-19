@@ -61,6 +61,9 @@ export interface SidebarProjectTree {
 /** Path split into segments, ignoring trailing slashes and mixed separators. */
 const segments = (path: string): string[] => path.replace(/[/\\]+$/, '').split(/[/\\]/).filter(Boolean)
 
+/** A path with trailing separators stripped, for stable equality checks. */
+const normalizePath = (path: null | string | undefined): string => (path ?? '').replace(/[/\\]+$/, '')
+
 /** Last path segment. */
 export const baseName = (path: string): string | undefined => segments(path).pop()
 
@@ -265,45 +268,125 @@ function liveLaneForRepo(repoRoot: string, session: SessionInfo): null | Sidebar
   return { id: branchLaneId(repoRoot, branch), isMain: true, label: branch, path: repoRoot, sessions: [] }
 }
 
-/** Overlay live sessions into an entered project's lanes (instant + working state). */
-export function overlayLiveLanes(project: SidebarProjectTree, live: SessionInfo[]): SidebarProjectTree {
-  // Longest root first so a nested repo wins the prefix match.
-  const ranked = project.repos.filter(repo => repo.path).sort((a, b) => (b.path?.length ?? 0) - (a.path?.length ?? 0))
-  const lanesByRepo = new Map(project.repos.map(repo => [repo.id, repo.groups.map(g => ({ ...g, sessions: [...g.sessions] }))]))
+const NO_REMOVED: ReadonlySet<string> = new Set()
+
+/**
+ * Reconcile ONE repo's lanes against the live `$sessions` cache: evict
+ * deleted/archived rows (`removed`) and inject freshly-created ones, so a lane
+ * mutates exactly like the flat Recents list. The backend snapshot stays the
+ * datasource for structure and off-page history; this is the optimistic layer
+ * on top (Apollo-style), reconciled away on the next snapshot refresh. Returns
+ * the same repo ref when nothing changes (memo-stable).
+ */
+export function overlayRepoLanes(
+  repo: SidebarWorkspaceTree,
+  live: SessionInfo[],
+  removed: ReadonlySet<string> = NO_REMOVED
+): SidebarWorkspaceTree {
+  const repoRoot = normalizePath(repo.path)
   let changed = false
 
-  for (const session of live) {
-    const repo = ranked.find(r => isPathUnder(r.path ?? '', (session.cwd || '').trim()))
-    const placed = repo && liveLaneForRepo(repo.path ?? '', session)
+  // Snapshot lanes minus anything the user just deleted/archived.
+  const lanes = repo.groups.map(g => {
+    if (!removed.size) {
+      return { ...g, sessions: [...g.sessions] }
+    }
 
-    if (!repo || !placed) {
+    const kept = g.sessions.filter(s => !removed.has(s.id))
+
+    changed ||= kept.length !== g.sessions.length
+
+    return { ...g, sessions: kept }
+  })
+
+  for (const session of live) {
+    const cwd = (session.cwd || '').trim()
+
+    if (removed.has(session.id) || !cwd) {
       continue
     }
 
-    const lanes = lanesByRepo.get(repo.id)!
+    // (1) Join an EXISTING worktree lane by its own path. A linked worktree can
+    // live anywhere on disk (often a repo sibling, e.g. `repo-ci`), so nesting
+    // under the repo root isn't reliable — but the lane carries its real dir.
+    // Longest match wins; skip the root lane so an in-tree `.worktrees/<slug>`
+    // session isn't swallowed by main.
+    let lane: SidebarSessionGroup | undefined
+    let bestLen = -1
 
-    const lane =
-      lanes.find(g => g.id === placed.id) ??
-      (placed.isMain ? lanes.find(g => g.isMain && g.label.toLowerCase() === placed.label.toLowerCase()) : undefined)
+    for (const g of lanes) {
+      const lanePath = normalizePath(g.path)
 
-    if (lane) {
-      lane.sessions = upsertSession(lane.sessions, session)
-    } else {
-      lanes.push({ ...placed, sessions: [session] })
+      if (!lanePath || lanePath === repoRoot || !isPathUnder(lanePath, cwd)) {
+        continue
+      }
+
+      const len = segments(lanePath).length
+
+      if (len > bestLen) {
+        bestLen = len
+        lane = g
+      }
     }
 
+    // (2) Else place under the repo root via a computed lane (main / branch /
+    // in-tree `.worktrees` / kanban). Match by id, then path (the backend may
+    // key a worktree lane off the git-probed root OR a branch-style id), then
+    // the main-lane label; create it when the snapshot lacked it.
+    if (!lane) {
+      const placed = repo.path ? liveLaneForRepo(repo.path, session) : null
+
+      if (!placed) {
+        continue
+      }
+
+      const placedPath = normalizePath(placed.path)
+
+      lane =
+        lanes.find(g => g.id === placed.id) ??
+        (placedPath ? lanes.find(g => normalizePath(g.path) === placedPath) : undefined) ??
+        (placed.isMain ? lanes.find(g => g.isMain && g.label.toLowerCase() === placed.label.toLowerCase()) : undefined)
+
+      if (!lane) {
+        lane = { ...placed, sessions: [] }
+        lanes.push(lane)
+      }
+    }
+
+    lane.sessions = upsertSession(lane.sessions, session)
     changed = true
   }
 
   if (!changed) {
-    return project
+    return repo
   }
 
-  const repos = project.repos.map(repo => {
-    const lanes = sortWorktreeGroups(lanesByRepo.get(repo.id)!)
+  // Drop lanes emptied by eviction (the server only emits non-empty lanes; the
+  // git-worktree enhancer re-adds any still-real worktree as an empty lane).
+  const groups = sortWorktreeGroups(lanes.filter(g => g.sessions.length > 0))
 
-    return { ...repo, groups: lanes, sessionCount: lanes.reduce((n, g) => n + g.sessions.length, 0) }
+  return { ...repo, groups, sessionCount: groups.reduce((n, g) => n + g.sessions.length, 0) }
+}
+
+/** Project-level overlay: {@link overlayRepoLanes} across every repo subtree. */
+export function overlayLiveLanes(
+  project: SidebarProjectTree,
+  live: SessionInfo[],
+  removed: ReadonlySet<string> = NO_REMOVED
+): SidebarProjectTree {
+  let changed = false
+
+  const repos = project.repos.map(repo => {
+    const next = overlayRepoLanes(repo, live, removed)
+
+    changed ||= next !== repo
+
+    return next
   })
+
+  if (!changed) {
+    return project
+  }
 
   return { ...project, repos, sessionCount: repos.reduce((n, repo) => n + repo.sessionCount, 0) }
 }
@@ -313,11 +396,16 @@ export function overlayLivePreviews(
   projects: SidebarProjectTree[],
   live: SessionInfo[],
   explicitProjects: ProjectInfo[],
-  limit: number
+  limit: number,
+  removed: ReadonlySet<string> = new Set()
 ): Record<string, SessionInfo[]> {
   const byProject = new Map<string, SessionInfo[]>()
 
   for (const session of live) {
+    if (removed.has(session.id)) {
+      continue
+    }
+
     const projectId = liveSessionProjectId(session, explicitProjects)
 
     if (!projectId) {
@@ -337,7 +425,7 @@ export function overlayLivePreviews(
     }
 
     const liveRows = byProject.get(node.id) ?? []
-    const base = node.previewSessions ?? []
+    const base = (node.previewSessions ?? []).filter(session => !removed.has(session.id))
 
     if (!liveRows.length && !base.length) {
       continue

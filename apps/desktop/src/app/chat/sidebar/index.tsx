@@ -102,6 +102,7 @@ import {
   $projectScope,
   $projectTree,
   $projectTreeLoading,
+  $removedSessionIds,
   $reposScanning,
   $scopedSessionIds,
   $worktreeRefreshToken,
@@ -152,8 +153,8 @@ import { SidebarSessionRow } from './session-row'
 import { VirtualSessionList } from './virtual-session-list'
 import {
   mergeRepoWorktreeGroups,
-  overlayLiveLanes,
   overlayLivePreviews,
+  overlayRepoLanes,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarSessionGroup,
@@ -537,6 +538,7 @@ export function ChatSidebar({
   const projectTree = useStore($projectTree)
   const projectTreeLoading = useStore($projectTreeLoading)
   const scopedSessionIds = useStore($scopedSessionIds)
+  const removedSessionIds = useStore($removedSessionIds)
   const reposScanning = useStore($reposScanning)
   const activeProjectId = useStore($activeProjectId)
   const projectScope = useStore($projectScope)
@@ -750,11 +752,13 @@ export function ChatSidebar({
   const worktreeGroupingActive = agentsGrouped && !showAllProfiles
   const gatewayReady = gatewayState === 'open'
 
-  // The project tree (membership, repos, lanes, counts) is computed
-  // authoritatively on the backend. Refresh it whenever the grouped view is
-  // active and the gateway is up; the disk scan (once per run) folds any
-  // zero-session repos into the same tree. Best-effort: failures keep the
-  // cached tree so the sidebar doesn't flicker.
+  // The backend project tree is a structural snapshot, NOT a per-message feed.
+  // Refresh it on structural edges only — entering the grouped view, a profile
+  // switch, gateway (re)connect — plus the once-per-run disk scan. Live session
+  // changes between refreshes are reflected by the in-memory overlay
+  // (overlayLiveLanes / overlayLivePreviews) off `$sessions`, so a turn
+  // completing does NOT re-run the heavy list_sessions_rich scan. Project
+  // mutations refresh the tree from their own store actions.
   useEffect(() => {
     if (worktreeGroupingActive && gatewayReady) {
       void refreshProjects()
@@ -762,16 +766,6 @@ export function ChatSidebar({
       void scanAndRecordRepos()
     }
   }, [worktreeGroupingActive, profileScope, gatewayReady])
-
-  // Re-fetch the tree whenever the recents set changes. `$sessions` is replaced
-  // on the same edges that matter here (a turn completing, a session created /
-  // resumed / deleted / archived), so a session started from the overview shows
-  // up under its project once it has activity — without a manual view toggle.
-  useEffect(() => {
-    if (worktreeGroupingActive && gatewayReady) {
-      void refreshProjectTree()
-    }
-  }, [worktreeGroupingActive, gatewayReady, sessions])
 
   // Apply the persisted repo + worktree orders to a project's repo subtrees.
   const orderRepos = useCallback(
@@ -869,13 +863,11 @@ export function ChatSidebar({
         ? enteredProjectTree
         : overviewEnteredProject
 
-    // Overlay live $sessions so a session started here appears instantly with
-    // its working arc, exactly like the flat Recents list (the backend snapshot
-    // catches up on the next tree refresh).
-    const live = overlayLiveLanes(hydrated, agentSessions)
-
-    return { ...live, repos: orderRepos(live.repos) }
-  }, [overviewEnteredProject, enteredProjectTree, agentSessions, orderRepos])
+    // The live-session overlay (creates/evictions) is applied per-repo in
+    // RepoFlatSection, AFTER the visual git-worktree lanes are merged in (so
+    // out-of-tree worktrees can be placed). Here we just order the snapshot.
+    return { ...hydrated, repos: orderRepos(hydrated.repos) }
+  }, [overviewEnteredProject, enteredProjectTree, orderRepos])
 
   const scopedRepoPaths = useMemo(
     () =>
@@ -936,8 +928,8 @@ export function ChatSidebar({
   // session shows under its project instantly (and with its working arc),
   // matching the flat Recents list. Keyed by project path for the rows.
   const overviewPreviews = useMemo<Record<string, SessionInfo[]>>(
-    () => overlayLivePreviews(projectOverview ?? [], agentSessions, projects, PROJECT_PREVIEW_COUNT),
-    [projectOverview, agentSessions, projects]
+    () => overlayLivePreviews(projectOverview ?? [], agentSessions, projects, PROJECT_PREVIEW_COUNT, removedSessionIds),
+    [projectOverview, agentSessions, projects, removedSessionIds]
   )
 
   const onEnterProject = useCallback(
@@ -1492,6 +1484,7 @@ export function ChatSidebar({
                       : undefined
                     : recentsMeta
                 }
+                liveSessions={inProject ? agentSessions : undefined}
                 onArchiveSession={onArchiveSession}
                 onDeleteSession={onDeleteSession}
                 onEnterProject={onEnterProject}
@@ -1508,6 +1501,7 @@ export function ChatSidebar({
                 projectOverviewPreviews={overviewPreviews}
                 projectRepoWorktrees={inProject ? scopedRepoWorktrees : undefined}
                 projectsLoading={worktreeGroupingActive ? projectTreeLoading : false}
+                removedSessionIds={inProject ? removedSessionIds : undefined}
                 rootClassName={cn(
                   'min-h-32 flex-1 overflow-hidden p-0',
                   !recentsVirtualizes && 'compact:min-h-0 compact:flex-none compact:overflow-visible'
@@ -1720,6 +1714,10 @@ interface SidebarSessionsSectionProps {
   // Live git lanes (`git worktree list`) for repos in the entered project —
   // a VISUAL enhancer only (empty lanes), never session membership.
   projectRepoWorktrees?: Record<string, HermesGitWorktree[]>
+  // Live session cache used for optimistic placement inside entered-project lanes.
+  liveSessions?: SessionInfo[]
+  // Client-side optimistic eviction layer (deleted/archived ids).
+  removedSessionIds?: ReadonlySet<string>
   // True while the entered project's hydrated lanes are loading.
   projectLanesLoading?: boolean
   activeProjectId?: null | string
@@ -1760,6 +1758,8 @@ function SidebarSessionsSection({
   onEnterProject,
   projectContent,
   projectRepoWorktrees,
+  liveSessions,
+  removedSessionIds,
   projectLanesLoading = false,
   activeProjectId,
   labelMeta,
@@ -1813,18 +1813,27 @@ function SidebarSessionsSection({
     !projectContent &&
     sessions.length >= VIRTUALIZE_THRESHOLD
 
+  // First paint into the grouped view (e.g. the app restoring the Projects tab)
+  // has flat recents in `sessions` but no tree yet. Show skeletons rather than
+  // flashing the flat session list until the overview/content/groups resolve. A
+  // background refresh keeps the prior tree, so this only fires when empty.
+  const showProjectsSkeleton =
+    projectsLoading && !hasProjectOverview && !hasProjectContent && !groups?.length
+
   let inner: React.ReactNode
 
-  if (showEmptyState) {
-    // While the backend project tree is still loading, show skeletons instead of
-    // the "no sessions" empty state so the overview doesn't flash empty.
-    inner = projectsLoading ? <SidebarSessionSkeletons /> : emptyState
+  if (showProjectsSkeleton) {
+    inner = <SidebarSessionSkeletons />
+  } else if (showEmptyState) {
+    inner = emptyState
   } else if (projectContent) {
     inner = (
       <EnteredProjectContent
         lanesLoading={projectLanesLoading}
+        liveSessions={liveSessions}
         onNewSession={onNewSessionInWorkspace}
         project={projectContent}
+        removedSessionIds={removedSessionIds}
         renderRows={renderRows}
         repoWorktrees={projectRepoWorktrees}
       />
@@ -1969,19 +1978,7 @@ function SidebarWorkspaceGroup({ group, renderRows, onNewSession, onRemove }: Si
                   onClick={() => (isProfileGroup ? newSessionInProfile(group.id) : onNewSession?.(group.path))}
                 />
               )}
-              {onRemove && (
-                <button
-                  aria-label={s.projects.removeWorktree}
-                  className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-destructive group-hover/workspace:opacity-100"
-                  onClick={event => {
-                    event.stopPropagation()
-                    onRemove()
-                  }}
-                  type="button"
-                >
-                  <Codicon name="trash" size="0.75rem" />
-                </button>
-              )}
+              {onRemove && <WorkspaceMenu onRemove={onRemove} path={group.path} />}
             </div>
           )
         }
@@ -2100,13 +2097,17 @@ function EnteredProjectContent({
   renderRows,
   onNewSession,
   lanesLoading = false,
-  repoWorktrees
+  repoWorktrees,
+  liveSessions,
+  removedSessionIds
 }: {
   project: SidebarProjectTree
   renderRows: (sessions: SessionInfo[]) => React.ReactNode
   onNewSession?: (path: null | string) => void
   lanesLoading?: boolean
   repoWorktrees?: Record<string, HermesGitWorktree[]>
+  liveSessions?: SessionInfo[]
+  removedSessionIds?: ReadonlySet<string>
 }) {
   if (!project.repos.length) {
     return null
@@ -2120,7 +2121,9 @@ function EnteredProjectContent({
         <RepoFlatSection
           discoveredWorktrees={repo.path ? repoWorktrees?.[repo.path] : undefined}
           key={repo.id}
+          liveSessions={liveSessions}
           onNewSession={onNewSession}
+          removedSessionIds={removedSessionIds}
           renderRows={renderRows}
           repo={repo}
           showHeader={!single}
@@ -2136,13 +2139,17 @@ function RepoFlatSection({
   showHeader,
   renderRows,
   onNewSession,
-  discoveredWorktrees
+  discoveredWorktrees,
+  liveSessions,
+  removedSessionIds
 }: {
   repo: SidebarWorkspaceTree
   showHeader: boolean
   renderRows: (sessions: SessionInfo[]) => React.ReactNode
   onNewSession?: (path: null | string) => void
   discoveredWorktrees?: HermesGitWorktree[]
+  liveSessions?: SessionInfo[]
+  removedSessionIds?: ReadonlySet<string>
 }) {
   const { t } = useI18n()
   const s = t.sidebar
@@ -2156,8 +2163,22 @@ function RepoFlatSection({
     [repo, discoveredWorktrees]
   )
 
+  // Optimistic placement runs against the MERGED lane set (backend + visual
+  // git-worktree lanes) so out-of-tree/sibling worktrees — which exist as visual
+  // lanes before the snapshot carries their sessions — get the new row. The
+  // overlay drops lanes it empties, so re-merge to restore still-real worktrees.
+  const overlaidGroups = useMemo(() => {
+    if (!(liveSessions?.length || removedSessionIds?.size)) {
+      return mergedGroups
+    }
+
+    const { groups } = overlayRepoLanes({ ...repo, groups: mergedGroups }, liveSessions ?? [], removedSessionIds)
+
+    return mergeRepoWorktreeGroups({ id: repo.id, path: repo.path, groups }, discoveredWorktrees)
+  }, [repo, mergedGroups, discoveredWorktrees, liveSessions, removedSessionIds])
+
   // Main lanes are always visible; linked worktrees can be user-dismissed.
-  const ordered = mergedGroups.filter(group => group.isMain || !dismissedWorktrees.includes(group.id))
+  const ordered = overlaidGroups.filter(group => group.isMain || !dismissedWorktrees.includes(group.id))
   const repoCount = ordered.reduce((sum, group) => sum + group.sessions.length, 0)
 
   // Removal asks how: actually `git worktree remove` it, or just hide the lane
@@ -2434,6 +2455,44 @@ function WorkspaceShowMoreButton({ count, label, onClick }: { count: number; lab
     >
       <Codicon name="ellipsis" size="0.75rem" />
     </button>
+  )
+}
+
+// Per-worktree actions (linked worktree lanes only), mirroring the session row
+// and ProjectMenu kebab: reveal in the file manager, copy path, and remove the
+// worktree (runs a real `git worktree remove` via the caller's confirm dialog).
+function WorkspaceMenu({ path, onRemove }: { path: null | string; onRemove: () => void }) {
+  const { t } = useI18n()
+  const p = t.sidebar.projects
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          aria-label={p.menu}
+          className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/workspace:opacity-100 data-[state=open]:opacity-100"
+          onClick={event => event.stopPropagation()}
+          type="button"
+        >
+          <Codicon name="kebab-vertical" size="0.75rem" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48" sideOffset={6}>
+        <DropdownMenuItem disabled={!path} onSelect={() => void revealPath(path)}>
+          <Codicon name="folder-opened" size="0.875rem" />
+          <span>{p.reveal}</span>
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={!path} onSelect={() => void copyPath(path)}>
+          <Codicon name="copy" size="0.875rem" />
+          <span>{p.copyPath}</span>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onRemove} variant="destructive">
+          <Codicon name="trash" size="0.875rem" />
+          <span>{`${p.removeWorktree}…`}</span>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
