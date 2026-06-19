@@ -455,6 +455,58 @@ describe('projectTreeFor', () => {
     expect(tree).toHaveLength(0)
   })
 
+  it('attributes sessions by persisted git_repo_root (no git probe needed)', () => {
+    // No resolver at all — the backend already stamped the repo root on the row.
+    const tree = projectTreeFor(
+      [
+        makeSession('/www/app/src', { git_repo_root: '/www/app' }),
+        makeSession('/www/app/docs', { git_repo_root: '/www/app' })
+      ],
+      [],
+      'No workspace'
+    )
+
+    expect(tree).toHaveLength(1)
+    expect(tree[0].isAuto).toBe(true)
+    expect(tree[0].label).toBe('app')
+    expect(tree[0].sessionCount).toBe(2)
+  })
+
+  it('seeds discovered repos with no loaded sessions (full-history backfill)', () => {
+    const tree = projectTreeFor([], [], 'No workspace', undefined, {
+      discoveredRepos: [
+        { root: '/www/alpha', label: 'alpha', sessions: 9, last_active: 5, branch: 'main' },
+        { root: '/www/beta', label: 'beta', sessions: 3, last_active: 4, branch: null }
+      ]
+    })
+
+    expect(tree.map(n => n.label).sort()).toEqual(['alpha', 'beta'])
+    expect(tree.every(n => n.isAuto)).toBe(true)
+    const alpha = tree.find(n => n.label === 'alpha')
+    expect(alpha?.sessionCount).toBe(9)
+    // Seeded with a repo node so drill-in can hydrate lanes on demand.
+    expect(alpha?.repos[0]?.path).toBe('/www/alpha')
+  })
+
+  it('does not double-list a discovered repo already owned by an explicit project', () => {
+    const project = makeProject('App', ['/www/app'])
+    const tree = projectTreeFor([], [project], 'No workspace', undefined, {
+      discoveredRepos: [{ root: '/www/app', label: 'app', sessions: 2, last_active: 1, branch: null }]
+    })
+
+    expect(tree).toHaveLength(1)
+    expect(tree[0].label).toBe('App')
+    expect(tree[0].isAuto).toBeFalsy()
+  })
+
+  it('does not re-seed a discovered repo that already has loaded sessions', () => {
+    const tree = projectTreeFor([makeSession('/www/app', { git_repo_root: '/www/app' })], [], 'No workspace', undefined, {
+      discoveredRepos: [{ root: '/www/app', label: 'app', sessions: 5, last_active: 1, branch: null }]
+    })
+
+    expect(tree.filter(n => n.id === '/www/app')).toHaveLength(1)
+  })
+
   it('explicit projects sort ahead of auto-projects', () => {
     const project = makeProject('App', ['/www/app'])
     const resolver: WorktreeResolver = cwd => {

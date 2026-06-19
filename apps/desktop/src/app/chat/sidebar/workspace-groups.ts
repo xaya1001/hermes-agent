@@ -1,5 +1,5 @@
 import type { HermesGitWorktree, HermesWorktreeInfo } from '@/global'
-import type { ProjectInfo, SessionInfo } from '@/hermes'
+import type { DiscoveredRepo, ProjectInfo, SessionInfo } from '@/hermes'
 
 export interface SidebarSessionGroup {
   id: string
@@ -259,7 +259,12 @@ function placeByHeuristic(path: string): WorkspacePlacement | null {
   }
 }
 
-function placeWorkspace(path: string, sessionBranch: string, resolver?: WorktreeResolver): WorkspacePlacement | null {
+function placeWorkspace(
+  path: string,
+  sessionBranch: string,
+  resolver?: WorktreeResolver,
+  persistedRoot = ''
+): WorkspacePlacement | null {
   const info = resolver?.(path)
 
   if (info?.repoRoot && info.worktreeRoot) {
@@ -317,6 +322,39 @@ function placeWorkspace(path: string, sessionBranch: string, resolver?: Worktree
     }
   }
 
+  // No live git probe (remote backend, or not-yet-probed): fall back to the
+  // backend-persisted repo root. This is the authoritative key — group by it,
+  // splitting the main checkout by the session's recorded branch (kanban tasks
+  // still collapse). Only when there's no persisted root do we guess by path.
+  if (persistedRoot) {
+    const kanbanDir = kanbanWorktreeDir(path)
+
+    if (kanbanDir) {
+      return {
+        parentKey: persistedRoot,
+        parentLabel: baseName(persistedRoot) ?? persistedRoot,
+        parentPath: persistedRoot,
+        worktreeKey: `${persistedRoot}::kanban`,
+        worktreeLabel: 'kanban',
+        worktreePath: kanbanDir,
+        isMain: false,
+        isKanban: true
+      }
+    }
+
+    const branch = sessionBranch.trim()
+
+    return {
+      parentKey: persistedRoot,
+      parentLabel: baseName(persistedRoot) ?? persistedRoot,
+      parentPath: persistedRoot,
+      worktreeKey: branch ? `${persistedRoot}::branch::${branch}` : `${persistedRoot}::branch::`,
+      worktreeLabel: branch || 'main',
+      worktreePath: persistedRoot,
+      isMain: true
+    }
+  }
+
   return placeByHeuristic(path)
 }
 
@@ -366,7 +404,12 @@ export function workspaceTreeFor(
       continue
     }
 
-    const placement = placeWorkspace(path, session.git_branch?.trim() || '', resolver)
+    const placement = placeWorkspace(
+      path,
+      session.git_branch?.trim() || '',
+      resolver,
+      (session.git_repo_root || '').trim()
+    )
 
     if (!placement) {
       noWorkspace.push(session)
@@ -509,6 +552,20 @@ export function projectForPath(projects: ProjectInfo[], cwd: string): ProjectInf
 }
 
 /** Longest-prefix project match against cwd and, when known, its git repoRoot. */
+/** The repo a session belongs to: the backend-persisted root wins; the local
+ *  git probe is only a fallback for rows not yet backfilled. */
+export function sessionRepoRoot(session: SessionInfo, resolver?: WorktreeResolver): string {
+  const persisted = (session.git_repo_root || '').trim()
+
+  if (persisted) {
+    return persisted
+  }
+
+  const cwd = (session.cwd || '').trim()
+
+  return (cwd && resolver?.(cwd)?.repoRoot) || ''
+}
+
 export function projectForSession(
   session: SessionInfo,
   projects: ProjectInfo[],
@@ -520,9 +577,8 @@ export function projectForSession(
     return null
   }
 
-  const info = resolver?.(cwd)
-  const candidates =
-    info?.repoRoot && info.repoRoot !== cwd ? [cwd, info.repoRoot] : [cwd]
+  const repoRoot = sessionRepoRoot(session, resolver)
+  const candidates = repoRoot && repoRoot !== cwd ? [cwd, repoRoot] : [cwd]
 
   let best: ProjectInfo | null = null
   let bestLen = -1
@@ -676,7 +732,7 @@ export function projectTreeFor(
   projects: ProjectInfo[],
   noWorkspaceLabel: string,
   resolver?: WorktreeResolver,
-  options: { preserveSessionOrder?: boolean } = {}
+  options: { preserveSessionOrder?: boolean; discoveredRepos?: DiscoveredRepo[] } = {}
 ): SidebarProjectTree[] {
   const activeProjects = projects.filter(project => !project.archived)
   const byProject = new Map<string, SessionInfo[]>()
@@ -717,8 +773,7 @@ export function projectTreeFor(
   const byRepoRoot = new Map<string, SessionInfo[]>()
 
   for (const session of unowned) {
-    const cwd = (session.cwd || '').trim()
-    const repoRoot = (cwd && resolver?.(cwd)?.repoRoot) || ''
+    const repoRoot = sessionRepoRoot(session, resolver)
 
     if (!repoRoot) {
       continue
@@ -729,6 +784,8 @@ export function projectTreeFor(
     byRepoRoot.set(repoRoot, list)
   }
 
+  const seen = new Set<string>()
+
   for (const [repoRoot, repoSessions] of byRepoRoot.entries()) {
     const repoNodes = workspaceTreeFor(repoSessions, noWorkspaceLabel, resolver, options)
     const repoNode = repoNodes.find(parent => parent.id === repoRoot || parent.path === repoRoot)
@@ -737,6 +794,7 @@ export function projectTreeFor(
       continue
     }
 
+    seen.add(repoRoot)
     result.push({
       id: repoRoot,
       label: baseName(repoRoot) || repoRoot,
@@ -744,6 +802,28 @@ export function projectTreeFor(
       isAuto: true,
       repos: [repoNode],
       sessionCount: repoNode.sessionCount
+    })
+  }
+
+  // Tier 3: repos discovered from FULL history (backend) that have no loaded
+  // session and aren't owned by an explicit project. Seeded with an empty repo
+  // node so the overview lists them and drill-in hydrates lanes on demand — the
+  // fix for "my repos don't show because their sessions aren't on this page".
+  for (const repo of options.discoveredRepos ?? []) {
+    const root = (repo.root || '').trim()
+
+    if (!root || seen.has(root) || projectForPath(activeProjects, root)) {
+      continue
+    }
+
+    seen.add(root)
+    result.push({
+      id: root,
+      label: repo.label || baseName(root) || root,
+      path: root,
+      isAuto: true,
+      repos: [{ id: root, label: repo.label || baseName(root) || root, path: root, groups: [], sessionCount: 0 }],
+      sessionCount: repo.sessions
     })
   }
 

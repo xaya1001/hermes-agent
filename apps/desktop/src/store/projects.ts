@@ -2,7 +2,7 @@ import { atom } from 'nanostores'
 
 import { persistString, storedString } from '@/lib/storage'
 import { activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
-import type { ProjectInfo, ProjectsPayload } from '@/types/hermes'
+import type { DiscoveredRepo, ProjectInfo, ProjectsPayload } from '@/types/hermes'
 
 // First-class, per-profile Projects (named, multi-folder workspaces). State is
 // served by the live gateway's `projects.*` JSON-RPC methods, which wrap the
@@ -14,6 +14,11 @@ export const $activeProjectId = atom<null | string>(null)
 // True once a list response has landed, so the sidebar can distinguish
 // "no projects yet" from "haven't loaded".
 export const $projectsLoaded = atom(false)
+
+// Git repos inferred from FULL session history (server-side probe), so the
+// sidebar auto-surfaces every repo the user has worked in — not just the ones
+// whose sessions happen to be in the loaded recents page.
+export const $discoveredRepos = atom<DiscoveredRepo[]>([])
 
 // ── Project scope (the "you're inside a project" view, mirroring profile scope)─
 // The sidebar's grouped view is a project switcher: ALL_PROJECTS shows the
@@ -78,6 +83,17 @@ export async function refreshProjects(): Promise<void> {
     applyPayload(await gatewayRequest<ProjectsPayload>('projects.list'))
   } catch {
     // Backend may not be ready; keep the last known list.
+  }
+}
+
+// Pull git repos inferred from full session history. Best-effort: a failure
+// leaves the cached set intact.
+export async function refreshDiscoveredRepos(): Promise<void> {
+  try {
+    const res = await gatewayRequest<{ repos: DiscoveredRepo[] }>('projects.discover_repos')
+    $discoveredRepos.set(res.repos ?? [])
+  } catch {
+    // Backend may not be ready; keep the last known set.
   }
 }
 

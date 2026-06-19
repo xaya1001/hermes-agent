@@ -99,6 +99,7 @@ import {
 } from '@/store/profile'
 import {
   $activeProjectId,
+  $discoveredRepos,
   $projects,
   $projectScope,
   ALL_PROJECTS,
@@ -109,6 +110,7 @@ import {
   openProjectAddFolder,
   openProjectCreate,
   openProjectRename,
+  refreshDiscoveredRepos,
   refreshProjects,
   removeWorktreePath,
   revealPath,
@@ -615,6 +617,7 @@ export function ChatSidebar({
   const workspaceOrderIds = useStore($sidebarWorkspaceOrderIds)
   const workspaceParentOrderIds = useStore($sidebarWorkspaceParentOrderIds)
   const projects = useStore($projects)
+  const discoveredRepos = useStore($discoveredRepos)
   const activeProjectId = useStore($activeProjectId)
   const projectScope = useStore($projectScope)
   const currentCwd = useStore($currentCwd)
@@ -836,6 +839,9 @@ export function ChatSidebar({
   useEffect(() => {
     if (worktreeGroupingActive) {
       void refreshProjects()
+      // Repos inferred from full session history (backend probe), so the
+      // overview lists every repo worked in — not just the loaded page's.
+      void refreshDiscoveredRepos()
     }
   }, [worktreeGroupingActive, profileScope])
 
@@ -875,12 +881,22 @@ export function ChatSidebar({
     const dismissed = new Set(dismissedAutoProjects)
 
     return sortProjectsForOverview(
-      projectTreeFor(agentSessions, projects, s.noWorkspace, worktreeResolver)
+      projectTreeFor(agentSessions, projects, s.noWorkspace, worktreeResolver, { discoveredRepos })
         .filter(node => !(node.isAuto && dismissed.has(node.id)))
         .map(project => ({ ...project, repos: orderRepos(project.repos) })),
       activeProjectId
     )
-  }, [showAllProfiles, agentSessions, projects, dismissedAutoProjects, s.noWorkspace, worktreeResolver, orderRepos, activeProjectId])
+  }, [
+    showAllProfiles,
+    agentSessions,
+    projects,
+    discoveredRepos,
+    dismissedAutoProjects,
+    s.noWorkspace,
+    worktreeResolver,
+    orderRepos,
+    activeProjectId
+  ])
 
   // Sessions claimed by any project (repo or user-created) — the inverse is the
   // flat, project-less recents list.

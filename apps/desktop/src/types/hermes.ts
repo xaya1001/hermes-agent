@@ -315,6 +315,11 @@ export interface SessionInfo {
    *  doesn't collapse under a single directory-named "main" row. Null for
    *  non-git workspaces and sessions created before branch capture landed. */
   git_branch?: null | string
+  /** Git repo root that owns {@link cwd} — the authoritative project key,
+   *  resolved server-side at cwd-set (and backfilled for history). The sidebar
+   *  groups by this instead of probing git in the GUI. Null for non-git
+   *  workspaces and not-yet-backfilled rows. */
+  git_repo_root?: null | string
   ended_at: null | number
   id: string
   /** Original root id of a compression chain, when this entry is a projected
@@ -552,6 +557,15 @@ export interface ProjectInfo {
 export interface ProjectsPayload {
   projects: ProjectInfo[]
   active_id: null | string
+}
+
+// A git repo inferred from session history (server-side `projects.discover_repos`).
+export interface DiscoveredRepo {
+  root: string
+  label: string
+  sessions: number
+  last_active: number
+  branch: null | string
 }
 
 export interface ProfileSoul {
