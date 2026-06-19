@@ -2160,7 +2160,11 @@ function RepoFlatSection({
   const ordered = mergedGroups.filter(group => group.isMain || !dismissedWorktrees.includes(group.id))
   const repoCount = ordered.reduce((sum, group) => sum + group.sessions.length, 0)
 
-  const removeWorktree = async (group: SidebarSessionGroup) => {
+  // Removal asks how: actually `git worktree remove` it, or just hide the lane
+  // and leave the worktree on disk.
+  const [removeTarget, setRemoveTarget] = useState<null | SidebarSessionGroup>(null)
+
+  const removeViaGit = async (group: SidebarSessionGroup) => {
     if (!repo.path || !group.path) {
       return
     }
@@ -2182,15 +2186,65 @@ function RepoFlatSection({
           // The kanban bucket is read-only: it aggregates many task worktrees, so
           // "new session here" and "remove worktree" have no single target.
           onNewSession={group.isKanban ? undefined : onNewSession}
-          onRemove={group.isMain || group.isKanban ? undefined : () => void removeWorktree(group)}
+          onRemove={group.isMain || group.isKanban ? undefined : () => setRemoveTarget(group)}
           renderRows={renderRows}
         />
       ))}
     </>
   )
 
+  const removeDialog = (
+    <Dialog onOpenChange={isOpen => !isOpen && setRemoveTarget(null)} open={Boolean(removeTarget)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{`${s.projects.removeWorktree} "${removeTarget?.label ?? ''}"?`}</DialogTitle>
+          <DialogDescription>
+            Remove it from git (deletes the worktree directory; the branch stays), or just hide the lane from the
+            sidebar and leave the worktree on disk.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button onClick={() => setRemoveTarget(null)} variant="ghost">
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              if (removeTarget) {
+                dismissWorktree(removeTarget.id)
+              }
+
+              setRemoveTarget(null)
+            }}
+            variant="secondary"
+          >
+            {s.projects.removeFromSidebar}
+          </Button>
+          <Button
+            onClick={() => {
+              const target = removeTarget
+
+              setRemoveTarget(null)
+
+              if (target) {
+                void removeViaGit(target)
+              }
+            }}
+            variant="destructive"
+          >
+            {s.projects.removeWorktree}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+
   if (!showHeader) {
-    return body
+    return (
+      <>
+        {body}
+        {removeDialog}
+      </>
+    )
   }
 
   return (
@@ -2207,6 +2261,7 @@ function RepoFlatSection({
         open={open}
       />
       {open && <div className={cn(SIDEBAR_STACK, 'pl-2.5')}>{body}</div>}
+      {removeDialog}
     </div>
   )
 }
