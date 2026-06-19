@@ -80,6 +80,9 @@ export const DEFAULT_BRANCH_LABEL = 'main'
 /** The one definition of a main-checkout lane id (must match the backend tree). */
 export const branchLaneId = (repoRoot: string, branch?: string): string => `${repoRoot}::branch::${(branch ?? '').trim()}`
 
+/** A session's recency stamp (last activity, falling back to creation). */
+export const sessionRecency = (session: SessionInfo): number => session.last_active || session.started_at || 0
+
 /** Default-branch names that pin to the top and read as the repo's trunk. */
 const TRUNK_BRANCHES = new Set(['main', 'master', 'trunk', 'develop'])
 
@@ -88,7 +91,7 @@ const isTrunkLane = (group: SidebarSessionGroup): boolean =>
 
 /** A lane's recency = its most-recently-active session (empty lanes sink). */
 const laneActivity = (group: SidebarSessionGroup): number =>
-  group.sessions.reduce((max, session) => Math.max(max, session.last_active || session.started_at || 0), 0)
+  group.sessions.reduce((max, session) => Math.max(max, sessionRecency(session)), 0)
 
 /**
  * Trunk (main/master/...) sticks to the top; the kanban aggregate sinks to the
@@ -174,8 +177,6 @@ export function mergeRepoWorktreeGroups(
 // needs the backend common-root probe, so those rows are left for the next
 // tree refresh; the common case (a new main-checkout session) overlays here.
 
-export const sessionRecency = (session: SessionInfo): number => session.last_active || session.started_at || 0
-
 /** True when `target` equals `folder` or is nested under it (segment-wise). */
 function isPathUnder(folder: string, target: string): boolean {
   const f = segments(folder)
@@ -188,16 +189,13 @@ function isPathUnder(folder: string, target: string): boolean {
   return f.every((seg, i) => seg === t[i])
 }
 
-interface LiveLanePlacement {
-  projectId: string
-  repoRoot: string
-  laneId: string
-  laneLabel: string
-  lanePath: string
-}
-
-/** Where a live session overlays: its project id + main-checkout lane key. */
-export function placeLiveSession(session: SessionInfo, explicitProjects: ProjectInfo[]): LiveLanePlacement | null {
+/**
+ * The project a plain main-checkout live session belongs to (overview
+ * membership) — explicit project by longest-prefix folder, else the repo root
+ * (the auto-project id). Returns null for sessions we can't place without the
+ * backend (cwd-less, kanban, or a linked worktree); those wait for the refresh.
+ */
+export function liveSessionProjectId(session: SessionInfo, explicitProjects: ProjectInfo[]): null | string {
   const cwd = (session.cwd || '').trim()
 
   if (!cwd || kanbanWorktreeDir(cwd)) {
@@ -208,7 +206,6 @@ export function placeLiveSession(session: SessionInfo, explicitProjects: Project
   const repoRoot = (session.git_repo_root || '').trim() || cwd
   const underRepo = cwd === repoRoot || cwd.startsWith(`${repoRoot}/`) || cwd.startsWith(`${repoRoot}\\`)
 
-  // Linked worktrees (cwd outside the repo root) need backend folding — skip.
   if (!underRepo || cwd.startsWith(`${repoRoot}/.worktrees/`) || cwd.startsWith(`${repoRoot}\\.worktrees\\`)) {
     return null
   }
@@ -233,22 +230,7 @@ export function placeLiveSession(session: SessionInfo, explicitProjects: Project
     }
   }
 
-  // Auto projects are keyed by their repo root (matches the backend tree id).
-  if (!projectId) {
-    projectId = repoRoot
-  }
-
-  // Empty branch folds into the one trunk "main" lane (matches the backend), so
-  // overlaying never spawns a second "main".
-  const branch = (session.git_branch || '').trim() || DEFAULT_BRANCH_LABEL
-
-  return {
-    projectId,
-    repoRoot,
-    laneId: branchLaneId(repoRoot, branch),
-    laneLabel: branch,
-    lanePath: repoRoot
-  }
+  return projectId || repoRoot
 }
 
 const upsertSession = (rows: SessionInfo[], session: SessionInfo): SessionInfo[] =>
@@ -336,15 +318,15 @@ export function overlayLivePreviews(
   const byProject = new Map<string, SessionInfo[]>()
 
   for (const session of live) {
-    const placement = placeLiveSession(session, explicitProjects)
+    const projectId = liveSessionProjectId(session, explicitProjects)
 
-    if (!placement) {
+    if (!projectId) {
       continue
     }
 
-    const arr = byProject.get(placement.projectId) ?? []
+    const arr = byProject.get(projectId) ?? []
     arr.push(session)
-    byProject.set(placement.projectId, arr)
+    byProject.set(projectId, arr)
   }
 
   const out: Record<string, SessionInfo[]> = {}

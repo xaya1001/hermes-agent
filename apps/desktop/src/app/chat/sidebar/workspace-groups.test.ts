@@ -1,17 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
 import type { HermesGitWorktree } from '@/global'
-import type { SessionInfo } from '@/types/hermes'
-
-import type { ProjectInfo } from '@/types/hermes'
+import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 import {
   baseName,
   kanbanWorktreeDir,
+  liveSessionProjectId,
   mergeRepoWorktreeGroups,
   overlayLiveLanes,
   overlayLivePreviews,
-  placeLiveSession,
   type SidebarProjectTree,
   type SidebarSessionGroup,
   sortWorktreeGroups
@@ -189,27 +187,23 @@ const projectNode = (over: Partial<SidebarProjectTree> & Pick<SidebarProjectTree
   ...over
 })
 
-describe('placeLiveSession', () => {
-  it('places a brand-new (unpersisted) session into its auto project + main lane', () => {
-    // New session: cwd set to the repo, no git_repo_root/git_branch yet.
-    const placement = placeLiveSession(makeSession('/www/app'), [])
-
-    // Empty branch canonicalizes to the one "main" lane (no separate ::branch:: bucket).
-    expect(placement).toMatchObject({ projectId: '/www/app', repoRoot: '/www/app', laneId: '/www/app::branch::main', laneLabel: 'main' })
+describe('liveSessionProjectId', () => {
+  it('maps a brand-new (unpersisted) session to its auto project (the repo root)', () => {
+    expect(liveSessionProjectId(makeSession('/www/app'), [])).toBe('/www/app')
   })
 
   it('routes a session under an explicit project folder to that project', () => {
-    const placement = placeLiveSession(makeSession('/www/app/src', { git_repo_root: '/www/app', git_branch: 'feat' }), [
+    const id = liveSessionProjectId(makeSession('/www/app/src', { git_repo_root: '/www/app', git_branch: 'feat' }), [
       makeProject('p_app', ['/www/app'])
     ])
 
-    expect(placement).toMatchObject({ projectId: 'p_app', laneId: '/www/app::branch::feat', laneLabel: 'feat' })
+    expect(id).toBe('p_app')
   })
 
   it('skips cwd-less, kanban, and linked-worktree sessions (backend folds those)', () => {
-    expect(placeLiveSession(makeSession(null), [])).toBeNull()
-    expect(placeLiveSession(makeSession('/repo/.worktrees/t_aaaaaaaa'), [])).toBeNull()
-    expect(placeLiveSession(makeSession('/elsewhere/wt', { git_repo_root: '/repo' }), [])).toBeNull()
+    expect(liveSessionProjectId(makeSession(null), [])).toBeNull()
+    expect(liveSessionProjectId(makeSession('/repo/.worktrees/t_aaaaaaaa'), [])).toBeNull()
+    expect(liveSessionProjectId(makeSession('/elsewhere/wt', { git_repo_root: '/repo' }), [])).toBeNull()
   })
 })
 
