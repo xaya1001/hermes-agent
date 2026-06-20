@@ -254,6 +254,36 @@ def test_discovered_repo_owned_by_explicit_project_is_not_duplicated():
     assert [p["id"] for p in tree["projects"] if p["path"] == "/www/app"] == ["p_app"]
 
 
+def test_junk_root_never_becomes_an_auto_project():
+    # A session whose git root is HERMES_HOME (config/state) must not spawn a
+    # phantom project; it falls through to flat Recents (unscoped). A real repo
+    # alongside it still groups normally.
+    resolve = _resolver(
+        {
+            "/home/me/.hermes": ("/home/me/.hermes", "/home/me/.hermes"),
+            "/www/app": ("/www/app", "/www/app"),
+        }
+    )
+    junk = _session("/home/me/.hermes", branch="main")
+    real = _session("/www/app", branch="main")
+    is_junk = lambda root: root == "/home/me/.hermes"
+
+    tree = pt.build_tree([], [junk, real], [], resolve, hydrate=True, is_junk_root=is_junk)
+
+    ids = {p["id"] for p in tree["projects"]}
+    assert ids == {"/www/app"}
+    assert junk["id"] not in tree["scoped_session_ids"]
+    assert real["id"] in tree["scoped_session_ids"]
+
+
+def test_junk_root_is_dropped_from_the_discovered_tier():
+    discovered = [{"root": "/home/me/.hermes", "label": ".hermes", "sessions": 0, "last_active": 9}]
+
+    tree = pt.build_tree([], [], discovered, resolve=None, is_junk_root=lambda r: r == "/home/me/.hermes")
+
+    assert tree["projects"] == []
+
+
 def test_colliding_repo_basenames_disambiguate_labels():
     resolve = _resolver(
         {

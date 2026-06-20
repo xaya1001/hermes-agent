@@ -379,6 +379,7 @@ def build_tree(
     *,
     preview_limit: int = 3,
     hydrate: bool = False,
+    is_junk_root: Optional[Callable[[str], bool]] = None,
 ) -> dict:
     """Build the authoritative project tree.
 
@@ -386,6 +387,9 @@ def build_tree(
     ``sessions`` are projected session-row dicts (must carry ``id``, ``cwd``,
     ``git_branch``, ``git_repo_root``, ``started_at``, ``last_active``).
     ``discovered_repos`` are ``{"root", "label", "sessions", "last_active"}``.
+    ``is_junk_root`` flags roots that must never become an AUTO project (the
+    bare home dir, the HERMES_HOME subtree) — their sessions fall through to the
+    flat Recents list. User-created projects are honored regardless.
 
     Returns ``{"projects": [...], "scoped_session_ids": [...]}``. When
     ``hydrate`` is False (overview), lane ``sessions`` arrays are emptied but
@@ -393,6 +397,7 @@ def build_tree(
     ``previewSessions``. When True (drill-in), lanes carry full session rows.
     """
     active_projects = [p for p in projects if not p.get("archived")]
+    _junk = is_junk_root or (lambda _root: False)
 
     by_project: dict[str, list[dict]] = {}
     unowned: list[dict] = []
@@ -443,6 +448,10 @@ def build_tree(
 
     seen: set[str] = set()
     for repo_root, repo_sessions in by_repo.items():
+        # The home dir / HERMES_HOME subtree is config + state, never a project;
+        # its sessions stay loose in Recents (not scoped to a phantom project).
+        if _junk(repo_root):
+            continue
         repos = _build_repos(repo_sessions, resolve, hydrate)
         repo_node = next((r for r in repos if r["id"] == repo_root or r["path"] == repo_root), None)
         if repo_node is None:
@@ -470,7 +479,7 @@ def build_tree(
             continue
         info = resolve(raw_root) if resolve else None
         root = (info or {}).get("repo_root") or raw_root
-        if root in seen or _project_for_path(active_projects, root):
+        if root in seen or _junk(root) or _project_for_path(active_projects, root):
             continue
         seen.add(root)
         label = repo.get("label") or base_name(root) or root

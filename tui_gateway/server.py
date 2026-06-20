@@ -8273,6 +8273,22 @@ def _(rid, params, pdb, conn) -> dict:
     return _ok(rid, {"project": proj.to_dict() if proj else None, "cwd": cwd, "branch": _git_branch_for_cwd(cwd)})
 
 
+def _is_repo_junk(root: str) -> bool:
+    """A git root we never auto-surface as a project: the bare home dir or
+    anything under HERMES_HOME (~/.hermes by default) — config/sessions/skills,
+    not a workspace. User-created projects pointing there are still honored."""
+    if not root:
+        return True
+
+    from hermes_constants import get_hermes_home
+
+    real = os.path.realpath(root)
+    home = os.path.realpath(os.path.expanduser("~"))
+    hermes_home = os.path.realpath(str(get_hermes_home()))
+
+    return real == home or real == hermes_home or real.startswith(hermes_home + os.sep)
+
+
 def _discover_repos_payload(db, *, conn=None, backfill: bool = True) -> list[dict]:
     """Merge filesystem-scanned repos (cached) with session-derived repo roots.
 
@@ -8286,15 +8302,7 @@ def _discover_repos_payload(db, *, conn=None, backfill: bool = True) -> list[dic
     the per-turn tree path (grouping uses the live git resolver regardless) and
     done only on the explicit discover/record refresh.
     """
-    from hermes_constants import get_hermes_home
-
-    home = os.path.realpath(os.path.expanduser("~"))
-    hermes_home = os.path.realpath(str(get_hermes_home()))
-
-    def _is_junk(root: str) -> bool:
-        real = os.path.realpath(root)
-        return real == home or real == hermes_home or real.startswith(hermes_home + os.sep)
-
+    _is_junk = _is_repo_junk
     repos: dict[str, dict] = {}
 
     def _agg(root: str) -> dict:
@@ -8463,7 +8471,13 @@ def _build_project_tree(
         db, session_limit, include_discovered=include_discovered
     )
     tree = project_tree.build_tree(
-        projects, sessions, discovered, _resolve_cwd_git, preview_limit=preview_limit, hydrate=hydrate
+        projects,
+        sessions,
+        discovered,
+        _resolve_cwd_git,
+        preview_limit=preview_limit,
+        hydrate=hydrate,
+        is_junk_root=_is_repo_junk,
     )
     return tree, active_id
 
