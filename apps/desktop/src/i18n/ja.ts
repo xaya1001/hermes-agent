@@ -1315,6 +1315,8 @@ export const ja = defineLocale({
       create: '作成',
       menu: 'プロジェクト操作',
       menuRename: '名前を変更',
+      menuAppearance: '外観',
+      noColor: '色なし',
       menuAddFolder: 'フォルダを追加',
       menuSetActive: 'アクティブに設定',
       menuDelete: '削除',

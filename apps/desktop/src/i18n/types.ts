@@ -914,6 +914,8 @@ export interface Translations {
       create: string
       menu: string
       menuRename: string
+      menuAppearance: string
+      noColor: string
       menuAddFolder: string
       menuSetActive: string
       menuDelete: string

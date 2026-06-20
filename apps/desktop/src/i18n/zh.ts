@@ -1373,6 +1373,8 @@ export const zh: Translations = {
       create: '创建',
       menu: '项目操作',
       menuRename: '重命名',
+      menuAppearance: '外观',
+      noColor: '无颜色',
       menuAddFolder: '添加文件夹',
       menuSetActive: '设为活动',
       menuDelete: '删除',

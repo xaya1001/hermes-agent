@@ -1186,6 +1186,8 @@ export const en: Translations = {
       create: 'Create',
       menu: 'Project actions',
       menuRename: 'Rename',
+      menuAppearance: 'Appearance',
+      noColor: 'No color',
       menuAddFolder: 'Add folder',
       menuSetActive: 'Set active',
       menuDelete: 'Delete',
