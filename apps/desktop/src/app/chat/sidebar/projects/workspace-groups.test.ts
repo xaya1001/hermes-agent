@@ -74,6 +74,7 @@ describe('kanbanWorktreeDir', () => {
 describe('sortWorktreeGroups', () => {
   it('pins trunk to the top, sinks kanban to the bottom, and orders the rest by recency', () => {
     const at = (t: number) => [makeSession('/x', { last_active: t })]
+
     const groups = [
       lane({ id: 'k', label: 'kanban', isKanban: true, sessions: at(999) }),
       lane({ id: 'stale', label: 'stale-branch', isMain: true, sessions: at(10) }),
@@ -99,6 +100,7 @@ describe('sortWorktreeGroups', () => {
 describe('mergeRepoWorktreeGroups (visual enhancer)', () => {
   it('injects a linked worktree lane discovered by git that has no sessions yet', () => {
     const repo = { id: '/repo', path: '/repo', groups: [lane({ id: '/repo::branch::main', label: 'main', isMain: true, path: '/repo' })] }
+
     const discovered: HermesGitWorktree[] = [
       { branch: 'feature', detached: false, isMain: false, locked: false, path: '/repo-wt-feature' }
     ]
@@ -112,6 +114,7 @@ describe('mergeRepoWorktreeGroups (visual enhancer)', () => {
 
   it('never spawns a lane per kanban task worktree', () => {
     const repo = { id: '/repo', path: '/repo', groups: [lane({ id: '/repo::branch::main', label: 'main', isMain: true, path: '/repo' })] }
+
     const discovered: HermesGitWorktree[] = [
       { branch: 'wt/t_aaaaaaaa', detached: false, isMain: false, locked: false, path: '/repo/.worktrees/t_aaaaaaaa' },
       { branch: 'wt/t_bbbbbbbb', detached: false, isMain: false, locked: false, path: '/repo/.worktrees/t_bbbbbbbb' }
@@ -128,6 +131,7 @@ describe('mergeRepoWorktreeGroups (visual enhancer)', () => {
         lane({ id: '/repo::branch::main', label: 'main', isMain: true, path: '/repo', sessions: [makeSession('/repo')] })
       ]
     }
+
     const discovered: HermesGitWorktree[] = [
       { branch: 'main', detached: false, isMain: true, locked: false, path: '/repo' }
     ]
@@ -147,6 +151,7 @@ describe('mergeRepoWorktreeGroups (visual enhancer)', () => {
 
   it('does not add a second "main" for a linked worktree checked out on main', () => {
     const groups = [lane({ id: '/repo::branch::main', label: 'main', isMain: true, path: '/repo', sessions: [makeSession('/repo')] })]
+
     const discovered: HermesGitWorktree[] = [
       { branch: 'main', detached: false, isMain: false, locked: false, path: '/repo/.worktrees/main-mirror' }
     ]
@@ -214,6 +219,7 @@ describe('overlayLiveLanes', () => {
       isAuto: true,
       repos: [{ id: '/www/app', label: 'app', path: '/www/app', sessionCount: 0, groups: [] }]
     })
+
     const live = [makeSession('/www/app', { id: 'fresh', git_branch: 'main' })]
 
     const overlaid = overlayLiveLanes(project, live)
@@ -232,6 +238,7 @@ describe('overlayLiveLanes', () => {
       isAuto: true,
       repos: [{ id: '/www/app', label: 'app', path: '/www/app', sessionCount: 0, groups: [] }]
     })
+
     const live = [makeSession('/www/app/.worktrees/baby', { id: 'fresh' })]
 
     const overlaid = overlayLiveLanes(project, live)
@@ -247,6 +254,7 @@ describe('overlayLiveLanes', () => {
       isAuto: true,
       repos: [{ id: '/www/app', label: 'app', path: '/www/app', sessionCount: 0, groups: [] }]
     })
+
     const live = [makeSession('/www/app/.worktrees/t_abc12345', { id: 'k' })]
 
     const overlaid = overlayLiveLanes(project, live)
@@ -258,6 +266,7 @@ describe('overlayLiveLanes', () => {
 
   it('does not duplicate a session already present in a backend lane', () => {
     const existing = makeSession('/www/app', { id: 'dup', git_branch: 'main' })
+
     const project = projectNode({
       id: '/www/app',
       repos: [
@@ -281,6 +290,7 @@ describe('overlayLiveLanes', () => {
     // but the lane PATH is the worktree dir. A new session under that worktree
     // must join the existing lane, not spawn a twin.
     const existing = makeSession('/www/app/.worktrees/baby', { id: 'old' })
+
     const project = projectNode({
       id: '/www/app',
       repos: [
@@ -295,6 +305,7 @@ describe('overlayLiveLanes', () => {
         }
       ]
     })
+
     const fresh = makeSession('/www/app/.worktrees/baby', { id: 'fresh' })
 
     const overlaid = overlayLiveLanes(project, [existing, fresh])
@@ -308,6 +319,7 @@ describe('overlayLiveLanes', () => {
     // `hermes-agent-ci` is a linked worktree living BESIDE the repo, not under
     // it — repo-root nesting fails, but the existing lane carries its real path.
     const existing = makeSession('/www/app-ci', { id: 'old' })
+
     const project = projectNode({
       id: '/www/app',
       repos: [
@@ -323,6 +335,7 @@ describe('overlayLiveLanes', () => {
         }
       ]
     })
+
     const fresh = makeSession('/www/app-ci', { id: 'fresh' })
 
     const overlaid = overlayLiveLanes(project, [existing, fresh])
@@ -336,10 +349,12 @@ describe('overlayLiveLanes', () => {
   it('places into a visual-only discovered worktree lane after merge', () => {
     const discovered = [{ path: '/www/app-retry', branch: 'bb/ci-install-retry', isMain: false, detached: false, locked: false }]
     const groups = mergeRepoWorktreeGroups({ id: '/www/app', path: '/www/app', groups: [] }, discovered)
+
     const project = projectNode({
       id: '/www/app',
       repos: [{ id: '/www/app', label: 'app', path: '/www/app', sessionCount: 0, groups }]
     })
+
     const fresh = makeSession('/www/app-retry', { id: 'fresh' })
 
     const overlaid = overlayLiveLanes(project, [fresh])
@@ -351,6 +366,7 @@ describe('overlayLiveLanes', () => {
   it('evicts a deleted/archived snapshot row (and drops the lane once empty)', () => {
     const a = makeSession('/www/app', { id: 'keep', git_branch: 'main' })
     const b = makeSession('/www/app/.worktrees/baby', { id: 'gone' })
+
     const project = projectNode({
       id: '/www/app',
       repos: [
@@ -382,6 +398,7 @@ describe('overlayLivePreviews', () => {
       id: '/www/app',
       previewSessions: [makeSession('/www/app', { id: 'old', started_at: 1, last_active: 1 })]
     })
+
     const live = [makeSession('/www/app', { id: 'fresh', started_at: 99, last_active: 99 })]
 
     const previews = overlayLivePreviews([project], live, [], 3)

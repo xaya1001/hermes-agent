@@ -21,16 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DisclosureCaret } from '@/components/ui/disclosure-caret'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
-import { Input } from '@/components/ui/input'
 import { KbdGroup } from '@/components/ui/kbd'
 import { SearchField } from '@/components/ui/search-field'
 import {
@@ -54,7 +45,6 @@ import { cn } from '@/lib/utils'
 import { $cronJobs } from '@/store/cron'
 import {
   $dismissedAutoProjectIds,
-  $dismissedWorktreeIds,
   $panesFlipped,
   $pinnedSessionIds,
   $sidebarAgentsGrouped,
@@ -66,11 +56,8 @@ import {
   $sidebarRecentsOpen,
   $sidebarSessionOrderIds,
   $sidebarSessionOrderManual,
-  $sidebarWorkspaceCollapsedIds,
   $sidebarWorkspaceOrderIds,
   $sidebarWorkspaceParentOrderIds,
-  dismissAutoProject,
-  dismissWorktree,
   pinSession,
   SESSION_SEARCH_FOCUS_EVENT,
   setPinnedSessionOrder,
@@ -84,16 +71,13 @@ import {
   setSidebarWorkspaceParentOrderIds,
   SIDEBAR_SESSIONS_PAGE_SIZE,
   toggleSidebarMessagingOpen,
-  toggleWorkspaceNodeCollapsed,
   unpinSession
 } from '@/store/layout'
-import { notifyError } from '@/store/notifications'
 import {
   $newChatProfile,
   $profiles,
   $profileScope,
   ALL_PROFILES,
-  newSessionInProfile,
   normalizeProfileKey
 } from '@/store/profile'
 import {
@@ -105,23 +89,14 @@ import {
   $removedSessionIds,
   $reposScanning,
   $scopedSessionIds,
-  $worktreeRefreshToken,
   ALL_PROJECTS,
-  copyPath,
-  deleteProject,
   enterProject,
   exitProjectScope,
   fetchProjectSessions,
-  openProjectAddFolder,
   openProjectCreate,
-  openProjectRename,
   refreshProjects,
   refreshProjectTree,
-  removeWorktreePath,
-  revealPath,
-  scanAndRecordRepos,
-  setActiveProject,
-  startWorkInRepo
+  scanAndRecordRepos
 } from '@/store/projects'
 import {
   $cronSessions,
@@ -144,22 +119,30 @@ import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE } from '..
 import { SidebarPanelLabel } from '../../shell/sidebar-label'
 import type { SidebarNavItem } from '../../types'
 
+import { countLabel, SidebarCount } from './chrome'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarLoadMoreRow } from './load-more-row'
 import { reconcileFreshFirst, resolveManualSessionOrderIds } from './order'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
-import { SidebarSessionRow } from './session-row'
-import { VirtualSessionList } from './virtual-session-list'
 import {
-  mergeRepoWorktreeGroups,
+  EnteredProjectContent,
   overlayLivePreviews,
-  overlayRepoLanes,
+  PROJECT_PREVIEW_COUNT,
+  ProjectMenu,
+  ProjectOverviewRow,
+  projectTreeCwd,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarSessionGroup,
-  type SidebarWorkspaceTree
-} from './workspace-groups'
+  SidebarWorkspaceGroup,
+  type SidebarWorkspaceTree,
+  sortProjectsForOverview,
+  StartWorkButton,
+  useRepoWorktreeMap
+} from './projects'
+import { SidebarSessionRow } from './session-row'
+import { VirtualSessionList } from './virtual-session-list'
 
 const VIRTUALIZE_THRESHOLD = 25
 
@@ -188,7 +171,6 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
   { id: 'artifacts', label: '', icon: props => <Codicon name="files" {...props} />, route: ARTIFACTS_ROUTE }
 ]
 
-const SIDEBAR_GROUP_PAGE = 5
 // Two modes via the `compact` height variant (styles.css):
 //   tall    → each section is shrink-0, capped, its own scroller; Sessions is flex-1.
 //   compact → COMPACT_FLAT drops the caps so the whole stack scrolls as one.
@@ -259,120 +241,6 @@ function ReorderableList({
   )
 }
 
-const countLabel = (loaded: number, total: number) => (total > loaded ? `${loaded}/${total}` : String(loaded))
-
-const pathListKey = (paths: string[]) =>
-  paths.map(path => path.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b)).join('\n')
-
-// minmax(0,1fr): pin the single column to the rail width so long labels truncate
-// instead of shoving controls off-screen.
-const SIDEBAR_STACK = 'grid grid-cols-[minmax(0,1fr)] gap-px'
-
-// Every session in a project, across its repos/worktrees (order-agnostic).
-const projectSessions = (project: SidebarProjectTree): SessionInfo[] =>
-  project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))
-
-const projectTreeCwd = (project: SidebarProjectTree): null | string =>
-  project.path || project.repos.find(repo => repo.path)?.path || null
-
-// Overview rows carry their activity stamp from the backend (lanes are empty in
-// overview mode), falling back to loaded session times when present.
-const projectActivityTime = (project: SidebarProjectTree): number =>
-  Math.max(
-    project.lastActive ?? 0,
-    projectSessions(project).reduce((latest, s) => Math.max(latest, sessionTime(s)), 0)
-  )
-
-// The project's most-recent sessions, for the overview preview under each row.
-const latestProjectSessions = (project: SidebarProjectTree, limit: number): SessionInfo[] =>
-  [...projectSessions(project)].sort((a, b) => sessionTime(b) - sessionTime(a)).slice(0, limit)
-
-function sortProjectsForOverview(projects: SidebarProjectTree[], activeProjectId: null | string): SidebarProjectTree[] {
-  return [...projects].sort((a, b) => {
-    const aActive = Boolean(activeProjectId && a.id === activeProjectId && !a.isAuto)
-    const bActive = Boolean(activeProjectId && b.id === activeProjectId && !b.isAuto)
-
-    if (aActive !== bActive) {
-      return aActive ? -1 : 1
-    }
-
-    const aExplicit = !a.isAuto
-    const bExplicit = !b.isAuto
-
-    if (aExplicit !== bExplicit) {
-      return aExplicit ? -1 : 1
-    }
-
-    const aHasSessions = a.sessionCount > 0
-    const bHasSessions = b.sessionCount > 0
-
-    if (aHasSessions !== bHasSessions) {
-      return aHasSessions ? -1 : 1
-    }
-
-    const activityDelta = projectActivityTime(b) - projectActivityTime(a)
-
-    if (activityDelta !== 0) {
-      return activityDelta
-    }
-
-    return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
-  })
-}
-
-// Project drill-in lanes are git-driven: source them from `git worktree list`
-// so linked worktrees still appear even when their sessions aren't in the
-// recents payload currently loaded in memory.
-function useRepoWorktreeMap(repoPaths: string[], enabled: boolean): [Record<string, HermesGitWorktree[]>, boolean] {
-  const [map, setMap] = useState<Record<string, HermesGitWorktree[]>>({})
-  const [loading, setLoading] = useState(false)
-  const key = useMemo(() => pathListKey(repoPaths), [repoPaths])
-  // Refetch when a worktree is added/removed so a new lane shows immediately.
-  const refreshToken = useStore($worktreeRefreshToken)
-
-  useEffect(() => {
-    const git = window.hermesDesktop?.git
-
-    if (!enabled || !repoPaths.length || !git?.worktreeList) {
-      setMap({})
-      setLoading(false)
-
-      return
-    }
-
-    let cancelled = false
-
-    setLoading(true)
-    void Promise.all(
-      repoPaths.map(async repoPath => {
-        try {
-          const worktrees = await git.worktreeList(repoPath)
-
-          return [repoPath, worktrees] as const
-        } catch {
-          return [repoPath, []] as const
-        }
-      })
-    )
-      .then(entries => {
-        if (!cancelled) {
-          setMap(Object.fromEntries(entries))
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false)
-        }
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [enabled, key, repoPaths, refreshToken])
-
-  return [map, loading]
-}
-
 function orderByIds<T>(items: T[], getId: (item: T) => string, orderIds: string[]): T[] {
   if (!orderIds.length) {
     return items
@@ -441,15 +309,6 @@ function searchResultToSession(result: SessionSearchResult): SessionInfo {
     title: null,
     tool_call_count: 0
   }
-}
-
-// Persisted open/collapse for a repo/worktree node (absent = open). Lets a
-// project's folder layout auto-restore when you enter it, and survive reloads.
-function useWorkspaceNodeOpen(id: string): [boolean, () => void] {
-  const collapsed = useStore($sidebarWorkspaceCollapsedIds)
-  const open = !collapsed.includes(id)
-
-  return [open, () => toggleWorkspaceNodeCollapsed(id)]
 }
 
 function useSortableBindings(id: string) {
@@ -1643,19 +1502,6 @@ function SidebarSessionSkeletons() {
   )
 }
 
-// A muted "Loading…" row — used while a project's git worktrees / lane recents
-// stream in, so the entered project doesn't read as finished-but-empty.
-function SidebarLoadingRow() {
-  const { t } = useI18n()
-
-  return (
-    <div className="flex min-h-7 items-center gap-1.5 rounded-lg pl-2 text-[0.75rem] text-(--ui-text-tertiary)">
-      <Codicon className="shrink-0 text-(--ui-text-quaternary)" name="loading" size="0.75rem" spinning />
-      <span>{t.sidebar.loading}</span>
-    </div>
-  )
-}
-
 function SidebarPinnedEmptyState() {
   const { t } = useI18n()
 
@@ -1916,727 +1762,6 @@ function SidebarSessionsSection({
         </SidebarGroupContent>
       )}
     </SidebarGroup>
-  )
-}
-
-interface SidebarWorkspaceGroupProps {
-  group: SidebarSessionGroup
-  renderRows: (sessions: SessionInfo[]) => React.ReactNode
-  onNewSession?: (path: null | string) => void
-  // When set (linked worktree rows), shows a remove affordance that runs a real
-  // `git worktree remove`.
-  onRemove?: () => void
-}
-
-function SidebarWorkspaceGroup({ group, renderRows, onNewSession, onRemove }: SidebarWorkspaceGroupProps) {
-  const { t } = useI18n()
-  const s = t.sidebar
-  const isProfileGroup = group.mode === 'profile'
-  const pageStep = SIDEBAR_GROUP_PAGE
-  const [open, toggleOpen] = useWorkspaceNodeOpen(group.id)
-  const [visibleCount, setVisibleCount] = useState(pageStep)
-
-  const loadedCount = group.sessions.length
-  // Profile groups know their on-disk total (children excluded); workspace
-  // groups only ever page within what's already loaded.
-  const totalCount = isProfileGroup ? Math.max(group.totalCount ?? loadedCount, loadedCount) : loadedCount
-  const visibleSessions = group.sessions.slice(0, visibleCount)
-  const hiddenCount = Math.max(0, totalCount - visibleSessions.length)
-  const nextCount = Math.min(pageStep, hiddenCount)
-
-  // Leading glyph: profile color dot, or a branch/kanban mark for a worktree.
-  const leadingIcon = group.color ? (
-    <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: group.color }} />
-  ) : (
-    <Codicon className="shrink-0 text-(--ui-text-tertiary)" name={group.isKanban ? 'checklist' : 'git-branch'} size="0.75rem" />
-  )
-
-  // Reveal already-loaded rows first; only hit the backend when the next page
-  // crosses what's been fetched for this profile.
-  const handleProfileLoadMore = () => {
-    const target = visibleCount + pageStep
-
-    setVisibleCount(target)
-
-    if (target > loadedCount && loadedCount < totalCount) {
-      group.onLoadMore?.()
-    }
-  }
-
-  return (
-    <div className={SIDEBAR_STACK}>
-      <WorkspaceHeader
-        action={
-          (onNewSession || isProfileGroup || onRemove) && (
-            <div className="flex items-center">
-              {(onNewSession || isProfileGroup) && (
-                <WorkspaceAddButton
-                  label={s.newSessionIn(group.label)}
-                  // Profile groups start a fresh session in that profile but keep
-                  // the all-profiles browse view (newSessionInProfile leaves the
-                  // scope alone); workspace groups seed the new session's cwd.
-                  onClick={() => (isProfileGroup ? newSessionInProfile(group.id) : onNewSession?.(group.path))}
-                />
-              )}
-              {onRemove && <WorkspaceMenu onRemove={onRemove} path={group.path} />}
-            </div>
-          )
-        }
-        count={isProfileGroup ? countLabel(visibleSessions.length, totalCount) : group.sessions.length}
-        icon={leadingIcon}
-        label={group.label}
-        onToggle={toggleOpen}
-        open={open}
-      />
-      {open && (
-        <>
-          {visibleSessions.length === 0 ? (
-            <div className="min-h-7 pl-2 text-[0.75rem] leading-7 text-(--ui-text-quaternary)">{s.noSessions}</div>
-          ) : (
-            renderRows(visibleSessions)
-          )}
-          {hiddenCount > 0 &&
-            (isProfileGroup ? (
-              <SidebarLoadMoreRow
-                loading={Boolean(group.loadingMore)}
-                onClick={handleProfileLoadMore}
-                step={nextCount}
-              />
-            ) : (
-              <WorkspaceShowMoreButton
-                count={nextCount}
-                label={group.label}
-                onClick={() => setVisibleCount(count => count + SIDEBAR_GROUP_PAGE)}
-              />
-            ))}
-        </>
-      )}
-    </div>
-  )
-}
-
-// Leading glyph shared by the overview row + scope banner.
-function projectIcon(project: SidebarProjectTree) {
-  if (project.color) {
-    return <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: project.color }} />
-  }
-
-  return <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="folder-library" size="0.75rem" />
-}
-
-interface ProjectOverviewRowProps {
-  project: SidebarProjectTree
-  onEnter?: (id: string) => void
-  onNewSession?: (path: null | string) => void
-  renderRows?: (sessions: SessionInfo[]) => React.ReactNode
-  activeProjectId?: null | string
-  // Recents fetched by cwd-prefix for this project (self-managed), used when the
-  // loaded recents page doesn't already contain the project's sessions.
-  previewSessions?: SessionInfo[]
-}
-
-// Number of recent sessions previewed under each project in the overview.
-const PROJECT_PREVIEW_COUNT = 3
-
-// One row in the project overview: icon + name (click to enter), a new-session +
-// (reveal on hover), and the manage menu (⋮). Below it, a preview of the
-// project's most recent sessions — clickable to resume without entering.
-function ProjectOverviewRow({
-  project,
-  onEnter,
-  onNewSession,
-  renderRows,
-  activeProjectId,
-  previewSessions
-}: ProjectOverviewRowProps) {
-  const { t } = useI18n()
-  const s = t.sidebar
-  const isActive = project.id === activeProjectId
-  // Prefer the project's own cwd-prefix fetch (authoritative recents, including
-  // sessions off the loaded page); fall back to whatever's already loaded.
-  const fetched = (previewSessions ?? []).slice(0, PROJECT_PREVIEW_COUNT)
-  const preview = renderRows ? (fetched.length ? fetched : latestProjectSessions(project, PROJECT_PREVIEW_COUNT)) : []
-
-  return (
-    <div>
-      <div className="group/workspace flex min-h-7 items-center gap-1 rounded-md pl-2 pr-1 hover:bg-(--ui-control-hover-background)">
-        <button
-          aria-label={s.projects.enter(project.label)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 bg-transparent py-1 text-left"
-          onClick={() => onEnter?.(project.id)}
-          type="button"
-        >
-          {projectIcon(project)}
-          <span
-            className={cn(
-              'min-w-0 flex-1 truncate text-[0.8125rem] text-(--ui-text-secondary)',
-              isActive && 'font-medium text-foreground'
-            )}
-          >
-            {project.label}
-          </span>
-        </button>
-        {onNewSession && (
-          <WorkspaceAddButton label={s.newSessionIn(project.label)} onClick={() => onNewSession(project.path)} />
-        )}
-        <ProjectMenu isActive={isActive} project={project} />
-      </div>
-      {preview.length > 0 && (
-        <div className={cn(SIDEBAR_STACK, 'pb-1 pl-4')}>{renderRows?.(preview)}</div>
-      )}
-    </div>
-  )
-}
-
-// The entered project's body. Main-checkout sessions render directly — no
-// redundant repo/branch header (the breadcrumb already names the project). Only
-// linked worktrees nest, shown by branch. Multi-folder projects keep per-repo
-// headers so the folders stay distinguishable.
-function EnteredProjectContent({
-  project,
-  renderRows,
-  onNewSession,
-  lanesLoading = false,
-  repoWorktrees,
-  liveSessions,
-  removedSessionIds
-}: {
-  project: SidebarProjectTree
-  renderRows: (sessions: SessionInfo[]) => React.ReactNode
-  onNewSession?: (path: null | string) => void
-  lanesLoading?: boolean
-  repoWorktrees?: Record<string, HermesGitWorktree[]>
-  liveSessions?: SessionInfo[]
-  removedSessionIds?: ReadonlySet<string>
-}) {
-  if (!project.repos.length) {
-    return null
-  }
-
-  const single = project.repos.length === 1
-
-  return (
-    <>
-      {project.repos.map(repo => (
-        <RepoFlatSection
-          discoveredWorktrees={repo.path ? repoWorktrees?.[repo.path] : undefined}
-          key={repo.id}
-          liveSessions={liveSessions}
-          onNewSession={onNewSession}
-          removedSessionIds={removedSessionIds}
-          renderRows={renderRows}
-          repo={repo}
-          showHeader={!single}
-        />
-      ))}
-      {lanesLoading && <SidebarLoadingRow />}
-    </>
-  )
-}
-
-function RepoFlatSection({
-  repo,
-  showHeader,
-  renderRows,
-  onNewSession,
-  discoveredWorktrees,
-  liveSessions,
-  removedSessionIds
-}: {
-  repo: SidebarWorkspaceTree
-  showHeader: boolean
-  renderRows: (sessions: SessionInfo[]) => React.ReactNode
-  onNewSession?: (path: null | string) => void
-  discoveredWorktrees?: HermesGitWorktree[]
-  liveSessions?: SessionInfo[]
-  removedSessionIds?: ReadonlySet<string>
-}) {
-  const { t } = useI18n()
-  const s = t.sidebar
-  const [open, toggleOpen] = useWorkspaceNodeOpen(repo.id)
-  const dismissedWorktrees = useStore($dismissedWorktreeIds)
-
-  // The repo's session lanes already come fully built from the backend; this
-  // only injects empty VISUAL lanes from a live `git worktree list`.
-  const mergedGroups = useMemo(
-    () => mergeRepoWorktreeGroups(repo, discoveredWorktrees),
-    [repo, discoveredWorktrees]
-  )
-
-  // Optimistic placement runs against the MERGED lane set (backend + visual
-  // git-worktree lanes) so out-of-tree/sibling worktrees — which exist as visual
-  // lanes before the snapshot carries their sessions — get the new row. The
-  // overlay drops lanes it empties, so re-merge to restore still-real worktrees.
-  const overlaidGroups = useMemo(() => {
-    if (!(liveSessions?.length || removedSessionIds?.size)) {
-      return mergedGroups
-    }
-
-    const { groups } = overlayRepoLanes({ ...repo, groups: mergedGroups }, liveSessions ?? [], removedSessionIds)
-
-    return mergeRepoWorktreeGroups({ id: repo.id, path: repo.path, groups }, discoveredWorktrees)
-  }, [repo, mergedGroups, discoveredWorktrees, liveSessions, removedSessionIds])
-
-  // Main lanes are always visible; linked worktrees can be user-dismissed.
-  const ordered = overlaidGroups.filter(group => group.isMain || !dismissedWorktrees.includes(group.id))
-  const repoCount = ordered.reduce((sum, group) => sum + group.sessions.length, 0)
-
-  // Removal asks how: actually `git worktree remove` it, or just hide the lane
-  // and leave the worktree on disk. A dirty worktree escalates to a force prompt
-  // instead of erroring (those changes are usually throwaway).
-  const [removeTarget, setRemoveTarget] = useState<null | SidebarSessionGroup>(null)
-  const [forceTarget, setForceTarget] = useState<null | SidebarSessionGroup>(null)
-
-  const removeViaGit = async (group: SidebarSessionGroup, force = false) => {
-    if (!repo.path || !group.path) {
-      return
-    }
-
-    try {
-      await removeWorktreePath(repo.path, group.path, { force })
-      dismissWorktree(group.id)
-    } catch (err) {
-      // git refuses a non-force remove on a dirty/locked worktree — offer force
-      // rather than dead-ending on an error toast.
-      if (!force && /force|modified|untracked|dirty|locked|contains/i.test(String((err as Error)?.message ?? ''))) {
-        setForceTarget(group)
-      } else {
-        notifyError(err, s.projects.removeWorktreeFailed)
-      }
-    }
-  }
-
-  const body = (
-    <>
-      {ordered.map(group => (
-        <SidebarWorkspaceGroup
-          group={group}
-          key={group.id}
-          // The kanban bucket is read-only: it aggregates many task worktrees, so
-          // "new session here" and "remove worktree" have no single target.
-          onNewSession={group.isKanban ? undefined : onNewSession}
-          onRemove={group.isMain || group.isKanban ? undefined : () => setRemoveTarget(group)}
-          renderRows={renderRows}
-        />
-      ))}
-    </>
-  )
-
-  // Both removal prompts share the shape (hide-from-sidebar + cancel + a
-  // destructive action); only the copy and the destructive handler differ.
-  const worktreeDialog = (
-    target: null | SidebarSessionGroup,
-    setTarget: (next: null | SidebarSessionGroup) => void,
-    description: string,
-    destructiveLabel: string,
-    onDestructive: (group: SidebarSessionGroup) => void
-  ) => (
-    <Dialog onOpenChange={isOpen => !isOpen && setTarget(null)} open={Boolean(target)}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{`${s.projects.removeWorktree} "${target?.label ?? ''}"?`}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button onClick={() => setTarget(null)} variant="ghost">
-            Cancel
-          </Button>
-          <Button
-            onClick={() => {
-              if (target) {
-                dismissWorktree(target.id)
-              }
-
-              setTarget(null)
-            }}
-            variant="secondary"
-          >
-            {s.projects.removeFromSidebar}
-          </Button>
-          <Button
-            onClick={() => {
-              setTarget(null)
-
-              if (target) {
-                onDestructive(target)
-              }
-            }}
-            variant="destructive"
-          >
-            {destructiveLabel}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-
-  const removeDialog = (
-    <>
-      {worktreeDialog(
-        removeTarget,
-        setRemoveTarget,
-        'Remove it from git (deletes the worktree directory; the branch stays), or just hide the lane from the sidebar and leave the worktree on disk.',
-        s.projects.removeWorktree,
-        group => void removeViaGit(group)
-      )}
-      {worktreeDialog(
-        forceTarget,
-        setForceTarget,
-        'This worktree has uncommitted changes. Force-remove it (discards those changes), or just hide the lane and keep it on disk.',
-        'Force remove',
-        group => void removeViaGit(group, true)
-      )}
-    </>
-  )
-
-  if (!showHeader) {
-    return (
-      <>
-        {body}
-        {removeDialog}
-      </>
-    )
-  }
-
-  return (
-    <div className={SIDEBAR_STACK}>
-      <WorkspaceHeader
-        action={
-          onNewSession && <WorkspaceAddButton label={s.newSessionIn(repo.label)} onClick={() => onNewSession(repo.path)} />
-        }
-        count={repoCount}
-        emphasis
-        icon={<Codicon className="shrink-0 text-(--ui-text-tertiary)" name="repo" size="0.75rem" />}
-        label={repo.label}
-        onToggle={toggleOpen}
-        open={open}
-      />
-      {open && <div className={cn(SIDEBAR_STACK, 'pl-2.5')}>{body}</div>}
-      {removeDialog}
-    </div>
-  )
-}
-
-// Per-project actions, modeled on git GUIs (GitHub Desktop / GitKraken): reveal
-// in the file manager, copy path, and "Remove from sidebar" (never deletes files
-// — auto projects are dismissed, explicit ones drop their entry). Explicit
-// projects additionally get rename / add folder / set active. Hidden until the
-// row is hovered (group/workspace), matching the + affordance.
-function ProjectMenu({
-  project,
-  isActive,
-  scoped = false,
-  onExitScope
-}: {
-  project: SidebarProjectTree
-  isActive: boolean
-  // True when rendered in the entered-project header, so removal can leave the
-  // now-defunct scope.
-  scoped?: boolean
-  onExitScope?: () => void
-}) {
-  const { t } = useI18n()
-  const p = t.sidebar.projects
-  const target = { id: project.id, name: project.label }
-  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
-
-  const removeAuto = () => {
-    dismissAutoProject(project.id)
-
-    if (scoped) {
-      onExitScope?.()
-    }
-  }
-
-  const confirmDelete = () => {
-    void deleteProject(project.id)
-    setConfirmDeleteOpen(false)
-
-    if (scoped) {
-      onExitScope?.()
-    }
-  }
-
-  return (
-    <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            aria-label={p.menu}
-            className={cn(
-              'grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground data-[state=open]:opacity-100',
-              // In the project header reveal on the whole header hover; in overview
-              // rows reveal on the row hover.
-              scoped ? 'group-hover/section:opacity-100' : 'group-hover/workspace:opacity-100'
-            )}
-            onClick={event => event.stopPropagation()}
-            type="button"
-          >
-            <Codicon name="kebab-vertical" size="0.75rem" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48" sideOffset={6}>
-          {!project.isAuto && (
-            <>
-              <DropdownMenuItem onSelect={() => openProjectRename(target)}>
-                <Codicon name="edit" size="0.875rem" />
-                <span>{p.menuRename}</span>
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => openProjectAddFolder(target)}>
-                <Codicon name="new-folder" size="0.875rem" />
-                <span>{p.menuAddFolder}</span>
-              </DropdownMenuItem>
-              <DropdownMenuItem disabled={isActive} onSelect={() => void setActiveProject(project.id)}>
-                <Codicon name="target" size="0.875rem" />
-                <span>{p.menuSetActive}</span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-            </>
-          )}
-          <DropdownMenuItem disabled={!project.path} onSelect={() => void revealPath(project.path)}>
-            <Codicon name="folder-opened" size="0.875rem" />
-            <span>{p.reveal}</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem disabled={!project.path} onSelect={() => void copyPath(project.path)}>
-            <Codicon name="copy" size="0.875rem" />
-            <span>{p.copyPath}</span>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          {project.isAuto ? (
-            <DropdownMenuItem onSelect={removeAuto} variant="destructive">
-              <Codicon name="trash" size="0.875rem" />
-              <span>{p.removeFromSidebar}</span>
-            </DropdownMenuItem>
-          ) : (
-            <DropdownMenuItem onSelect={() => setConfirmDeleteOpen(true)} variant="destructive">
-              <Codicon name="trash" size="0.875rem" />
-              <span>{`${p.menuDelete}…`}</span>
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <Dialog onOpenChange={setConfirmDeleteOpen} open={confirmDeleteOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{`${p.menuDelete} "${project.label}"?`}</DialogTitle>
-            <DialogDescription>
-              This removes the saved project from Hermes. Files, git repos, and worktrees stay untouched.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button onClick={() => setConfirmDeleteOpen(false)} variant="ghost">
-              Cancel
-            </Button>
-            <Button onClick={confirmDelete} variant="destructive">
-              {p.menuDelete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
-  )
-}
-
-function SidebarCount({ children }: { children: React.ReactNode }) {
-  return <span className="text-[0.6875rem] font-medium text-(--ui-text-quaternary)">{children}</span>
-}
-
-// Reveals the next page of already-loaded rows within a workspace/worktree.
-function WorkspaceShowMoreButton({ count, label, onClick }: { count: number; label: string; onClick: () => void }) {
-  const { t } = useI18n()
-  const text = t.sidebar.showMoreIn(count, label)
-
-  return (
-    <button
-      aria-label={text}
-      className="ml-auto grid size-5 place-items-center rounded-sm bg-transparent text-(--ui-text-tertiary) transition-colors hover:bg-(--ui-control-hover-background) hover:text-foreground"
-      onClick={onClick}
-      type="button"
-    >
-      <Codicon name="ellipsis" size="0.75rem" />
-    </button>
-  )
-}
-
-// Per-worktree actions (linked worktree lanes only), mirroring the session row
-// and ProjectMenu kebab: reveal in the file manager, copy path, and remove the
-// worktree (runs a real `git worktree remove` via the caller's confirm dialog).
-function WorkspaceMenu({ path, onRemove }: { path: null | string; onRemove: () => void }) {
-  const { t } = useI18n()
-  const p = t.sidebar.projects
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          aria-label={p.menu}
-          className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/workspace:opacity-100 data-[state=open]:opacity-100"
-          onClick={event => event.stopPropagation()}
-          type="button"
-        >
-          <Codicon name="kebab-vertical" size="0.75rem" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-48" sideOffset={6}>
-        <DropdownMenuItem disabled={!path} onSelect={() => void revealPath(path)}>
-          <Codicon name="folder-opened" size="0.875rem" />
-          <span>{p.reveal}</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled={!path} onSelect={() => void copyPath(path)}>
-          <Codicon name="copy" size="0.875rem" />
-          <span>{p.copyPath}</span>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onRemove} variant="destructive">
-          <Codicon name="trash" size="0.875rem" />
-          <span>{`${p.removeWorktree}…`}</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-// "+" affordance shared by repo and worktree headers — reveals on header hover.
-function WorkspaceAddButton({ label, onClick }: { label: string; onClick: () => void }) {
-  return (
-    <button
-      aria-label={label}
-      className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/workspace:opacity-100"
-      onClick={onClick}
-      type="button"
-    >
-      <Codicon name="add" size="0.75rem" />
-    </button>
-  )
-}
-
-// "New worktree": prompt for a branch name, then git spins up a fresh worktree
-// for that branch under the repo (the lightest way) and we open a new session
-// inside it. Naming is explicit — no auto-generated `hermes/work-<ts>` trees.
-function StartWorkButton({ repoPath, onStarted }: { repoPath: string; onStarted: (path: string) => void }) {
-  const { t } = useI18n()
-  const s = t.sidebar
-  const [open, setOpen] = useState(false)
-  const [name, setName] = useState('')
-  const [pending, setPending] = useState(false)
-
-  const submit = async () => {
-    const branch = name.trim()
-
-    if (pending || !repoPath || !branch) {
-      return
-    }
-
-    setPending(true)
-
-    try {
-      // Pass the typed value as both the dir slug source and the branch, so the
-      // branch is exactly what the user named (the dir is slugified git-side).
-      const result = await startWorkInRepo(repoPath, { branch, name: branch })
-
-      if (result) {
-        onStarted(result.path)
-        setOpen(false)
-        setName('')
-      }
-    } catch (err) {
-      notifyError(err, s.projects.startWorkFailed)
-    } finally {
-      setPending(false)
-    }
-  }
-
-  return (
-    <>
-      <button
-        aria-label={s.projects.startWork}
-        className="grid size-4 shrink-0 place-items-center rounded-sm bg-transparent text-(--ui-text-quaternary) opacity-0 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground group-hover/section:opacity-100 focus-visible:opacity-100"
-        onClick={() => setOpen(true)}
-        type="button"
-      >
-        <Codicon name="git-branch" size="0.75rem" />
-      </button>
-      <Dialog onOpenChange={setOpen} open={open}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{s.projects.newWorktreeTitle}</DialogTitle>
-            <DialogDescription>{s.projects.newWorktreeDesc}</DialogDescription>
-          </DialogHeader>
-          <Input
-            autoFocus
-            disabled={pending}
-            onChange={event => setName(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                void submit()
-              } else if (event.key === 'Escape') {
-                setOpen(false)
-              }
-            }}
-            placeholder={s.projects.branchPlaceholder}
-            value={name}
-          />
-          <DialogFooter>
-            <Button disabled={pending} onClick={() => setOpen(false)} type="button" variant="ghost">
-              {t.common.cancel}
-            </Button>
-            <Button disabled={pending || !name.trim()} onClick={() => void submit()} type="button">
-              {s.projects.startWork}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
-  )
-}
-
-// Collapsible header shared by the repo (emphasis) and worktree levels: a
-// toggle button with a leading glyph, plus an optional trailing action (the +).
-function WorkspaceHeader({
-  action,
-  count,
-  emphasis = false,
-  icon,
-  label,
-  onToggle,
-  open
-}: {
-  action?: React.ReactNode
-  count: React.ReactNode
-  emphasis?: boolean
-  icon: React.ReactNode
-  label: string
-  onToggle: () => void
-  open: boolean
-}) {
-  return (
-    <div
-      className={cn(
-        'group/workspace flex min-h-6 items-center gap-1 px-2 pt-1 text-[0.6875rem]',
-        emphasis ? 'font-semibold text-(--ui-text-secondary)' : 'font-medium text-(--ui-text-tertiary)'
-      )}
-    >
-      <button
-        className={cn(
-          'flex min-w-0 flex-1 items-center gap-1.5 bg-transparent text-left',
-          emphasis ? 'hover:text-foreground' : 'hover:text-(--ui-text-secondary)'
-        )}
-        onClick={onToggle}
-        type="button"
-      >
-        {icon}
-        <span className="min-w-0 truncate">{label}</span>
-        <span className="shrink-0">
-          <SidebarCount>{count}</SidebarCount>
-        </span>
-        <DisclosureCaret
-          className="shrink-0 text-(--ui-text-tertiary) opacity-0 transition group-hover/workspace:opacity-100"
-          open={open}
-        />
-      </button>
-      {action}
-    </div>
   )
 }
 

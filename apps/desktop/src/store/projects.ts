@@ -1,6 +1,6 @@
 import { atom } from 'nanostores'
 
-import type { SidebarProjectTree } from '@/app/chat/sidebar/workspace-groups'
+import type { SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
 import { persistString, storedString } from '@/lib/storage'
 import { activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
 import type { ProjectInfo, ProjectsPayload } from '@/types/hermes'
