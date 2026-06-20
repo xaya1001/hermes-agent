@@ -252,14 +252,34 @@ export async function renameProject(id: string, name: string): Promise<void> {
   await updateProject(id, { name })
 }
 
-// Patch top-level project fields (name / appearance). Only provided keys change.
+// Patch top-level project fields (name / appearance). Optimistic: the cached
+// tree + list update instantly so a color/icon/name change has no round-trip
+// lag; only a failed write reconciles from the server.
 export async function updateProject(
   id: string,
   patch: { name?: string; color?: null | string; icon?: null | string }
 ): Promise<void> {
-  await gatewayRequest('projects.update', { id, ...patch })
-  await refreshProjects()
-  await refreshProjectTree()
+  $projectTree.set(
+    $projectTree.get().map(node =>
+      node.id === id
+        ? {
+            ...node,
+            ...(patch.name !== undefined && { label: patch.name }),
+            ...(patch.color !== undefined && { color: patch.color }),
+            ...(patch.icon !== undefined && { icon: patch.icon })
+          }
+        : node
+    )
+  )
+  $projects.set($projects.get().map(proj => (proj.id === id ? { ...proj, ...patch } : proj)))
+
+  try {
+    await gatewayRequest('projects.update', { id, ...patch })
+  } catch (err) {
+    await refreshProjects()
+    await refreshProjectTree()
+    throw err
+  }
 }
 
 export async function addProjectFolder(
