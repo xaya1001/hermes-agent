@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import type { HermesGitWorktree } from '@/global'
 import type { SessionInfo } from '@/hermes'
+import { mapPool } from '@/lib/pool'
 import { $sidebarWorkspaceCollapsedIds, toggleWorkspaceNodeCollapsed } from '@/store/layout'
 import { $worktreeRefreshToken } from '@/store/projects'
 
@@ -17,6 +18,9 @@ export const SIDEBAR_GROUP_PAGE = 5
 
 // Recent sessions previewed under each project in the overview.
 export const PROJECT_PREVIEW_COUNT = 3
+
+// Max concurrent `git worktree list` probes when a project spans many repos.
+const WORKTREE_PROBE_CONCURRENCY = 4
 
 const pathListKey = (paths: string[]): string =>
   paths.map(path => path.trim()).filter(Boolean).sort((a, b) => a.localeCompare(b)).join('\n')
@@ -93,15 +97,14 @@ export function useRepoWorktreeMap(
     let cancelled = false
 
     setLoading(true)
-    void Promise.all(
-      repoPaths.map(async repoPath => {
-        try {
-          return [repoPath, await git.worktreeList(repoPath)] as const
-        } catch {
-          return [repoPath, []] as const
-        }
-      })
-    )
+    // Bounded so a many-repo project doesn't spawn a `git` process per repo at once.
+    void mapPool(repoPaths, WORKTREE_PROBE_CONCURRENCY, async repoPath => {
+      try {
+        return [repoPath, await git.worktreeList(repoPath)] as const
+      } catch {
+        return [repoPath, []] as const
+      }
+    })
       .then(entries => void (cancelled || setMap(Object.fromEntries(entries))))
       .finally(() => void (cancelled || setLoading(false)))
 
