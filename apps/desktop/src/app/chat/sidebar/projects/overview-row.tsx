@@ -4,7 +4,6 @@ import { Codicon } from '@/components/ui/codicon'
 import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
-import { pickPrimaryProjectFolder } from '@/store/projects'
 
 import { latestProjectSessions, PROJECT_PREVIEW_COUNT, SIDEBAR_STACK } from './model'
 import { ProjectMenu } from './project-menu'
@@ -50,17 +49,6 @@ export function ProjectOverviewRow({
   const fetched = (previewSessions ?? []).slice(0, PROJECT_PREVIEW_COUNT)
   const preview = renderRows ? (fetched.length ? fetched : latestProjectSessions(project, PROJECT_PREVIEW_COUNT)) : []
 
-  // A project owns sessions by folder (cwd-prefix). A folder-less project has no
-  // cwd to start in, so anchor it to a picked directory first, then seed the
-  // session there; otherwise just start in its primary folder.
-  const startSession = async () => {
-    const cwd = project.path || (await pickPrimaryProjectFolder(project.id))
-
-    if (cwd) {
-      onNewSession?.(cwd)
-    }
-  }
-
   return (
     <div>
       <div className="group/workspace flex min-h-7 items-center gap-1 rounded-md pl-2 pr-1 hover:bg-(--ui-control-hover-background)">
@@ -80,7 +68,7 @@ export function ProjectOverviewRow({
             {project.label}
           </span>
         </button>
-        {onNewSession && <WorkspaceAddButton label={s.newSessionIn(project.label)} onClick={() => void startSession()} />}
+        {onNewSession && <WorkspaceAddButton label={s.newSessionIn(project.label)} onClick={() => onNewSession(project.path)} />}
         <ProjectMenu isActive={isActive} project={project} />
       </div>
       {preview.length > 0 && <div className={cn(SIDEBAR_STACK, 'pb-1 pl-4')}>{renderRows?.(preview)}</div>}

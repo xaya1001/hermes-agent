@@ -1,7 +1,6 @@
 import { atom } from 'nanostores'
 
 import type { SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
-import { selectDesktopPaths } from '@/lib/desktop-fs'
 import { persistString, storedString } from '@/lib/storage'
 import { activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
 import type { ProjectInfo, ProjectsPayload } from '@/types/hermes'
@@ -273,23 +272,6 @@ export async function addProjectFolder(
 export async function deleteProject(id: string): Promise<void> {
   applyPayload(await gatewayRequest<ProjectsPayload>('projects.delete', { id }))
   await refreshProjectTree()
-}
-
-// Anchor a folder-less project to a directory before its first session: a
-// project owns sessions by folder (cwd-prefix), so a session "in" a project
-// needs a folder. Pick one, make it the project's primary folder + active, and
-// return it as the new session's cwd. Returns null if the picker is dismissed.
-export async function pickPrimaryProjectFolder(id: string): Promise<null | string> {
-  const [dir] = await selectDesktopPaths({ directories: true, multiple: false })
-
-  if (!dir) {
-    return null
-  }
-
-  await addProjectFolder(id, dir, { isPrimary: true })
-  await setActiveProject(id)
-
-  return dir
 }
 
 export async function setActiveProject(id: null | string): Promise<void> {

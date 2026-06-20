@@ -102,7 +102,9 @@ export function ProjectDialog() {
     }
 
     if (mode === 'create') {
-      if (!trimmed) {
+      // A project owns sessions by folder (cwd-prefix), so creation requires at
+      // least one — a folder-less project couldn't hold a session anyway.
+      if (!trimmed || !folders.length) {
         return
       }
 
@@ -211,7 +213,11 @@ export function ProjectDialog() {
             <Button disabled={submitting} onClick={() => onOpenChange(false)} type="button" variant="ghost">
               {t.common.cancel}
             </Button>
-            <Button disabled={submitting || !name.trim()} onClick={() => void submit()} type="button">
+            <Button
+              disabled={submitting || !name.trim() || (mode === 'create' && folders.length === 0)}
+              onClick={() => void submit()}
+              type="button"
+            >
               {mode === 'rename' ? t.common.save : p.create}
             </Button>
           </DialogFooter>
