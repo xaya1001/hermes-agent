@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -15,7 +16,7 @@ import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { useI18n } from '@/i18n'
 import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { cn } from '@/lib/utils'
-import { dismissAutoProject } from '@/store/layout'
+import { $panesFlipped, dismissAutoProject } from '@/store/layout'
 import {
   copyPath,
   deleteProject,
@@ -59,6 +60,9 @@ export function ProjectMenu({
   const target = { id: project.id, name: project.label }
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
   const [appearanceOpen, setAppearanceOpen] = useState(false)
+  // Open toward the content area: right when the sidebar is on the left, left
+  // when the panes are flipped (sidebar on the right).
+  const panesFlipped = useStore($panesFlipped)
 
   const removeAuto = () => {
     dismissAutoProject(project.id)
@@ -144,7 +148,13 @@ export function ProjectMenu({
           )}
         </DropdownMenuContent>
       </DropdownMenu>
-      <PopoverContent align="end" className="w-auto p-2" onClick={event => event.stopPropagation()} sideOffset={6}>
+      <PopoverContent
+        align="start"
+        className="w-auto p-2"
+        onClick={event => event.stopPropagation()}
+        side={panesFlipped ? 'left' : 'right'}
+        sideOffset={6}
+      >
         <ColorSwatches
           clearIcon="circle-slash"
           clearLabel={p.noColor}
@@ -152,12 +162,14 @@ export function ProjectMenu({
           swatches={PROFILE_SWATCHES}
           value={project.color ?? null}
         />
-        <div className="mt-2 grid grid-cols-7 gap-1">
+        {/* Same 6 columns + gap as the swatch grid so the popover keeps the
+            profile picker's width (icons flex to fill, not fixed-width). */}
+        <div className="mt-2 grid grid-cols-6 gap-1.5">
           {ICONS.map(name => (
             <button
               aria-label={name}
               className={cn(
-                'grid size-7 place-items-center rounded-md text-(--ui-text-tertiary) transition hover:bg-(--ui-control-hover-background)',
+                'grid aspect-square place-items-center rounded-md text-(--ui-text-tertiary) transition hover:bg-(--ui-control-hover-background)',
                 project.icon === name && 'bg-(--ui-control-active-background) text-foreground'
               )}
               key={name}
@@ -165,7 +177,7 @@ export function ProjectMenu({
               style={project.icon === name && project.color ? { color: project.color } : undefined}
               type="button"
             >
-              <Codicon name={name} size="0.875rem" />
+              <Codicon name={name} size="0.8125rem" />
             </button>
           ))}
         </div>
