@@ -41,16 +41,48 @@ def test_for_cwd_is_a_long_handler():
 def test_repo_root_cache_does_not_freeze_a_not_yet_repo(monkeypatch):
     # We `git init` a new project's folder on first worktree; the cache must not
     # have frozen the pre-init "" result, or the main lane mislabels by basename.
-    cwd = "/tmp/baby pics"
-    server._repo_root_cache.clear()
-    state = {"root": ""}  # flips once the folder becomes a repo
-    monkeypatch.setattr(server, "_git", lambda c, *a: state["root"] if c == cwd else "")
+    from tui_gateway import git_probe
 
-    assert server._git_repo_root_for_cwd(cwd) == ""  # pre-init: not a repo (uncached)
+    cwd = "/tmp/baby pics"
+    git_probe.invalidate()
+    state = {"root": ""}  # flips once the folder becomes a repo
+    monkeypatch.setattr(git_probe, "run_git", lambda c, *a: state["root"] if c == cwd else "")
+
+    assert git_probe.repo_root(cwd) == ""  # pre-init: not a repo (uncached)
 
     state["root"] = cwd  # `git init` happened
-    assert server._git_repo_root_for_cwd(cwd) == cwd  # re-probed, not frozen
-    assert server._git_repo_root_for_cwd(cwd) == cwd  # now cached
+    assert git_probe.repo_root(cwd) == cwd  # re-probed, not frozen
+    assert git_probe.repo_root(cwd) == cwd  # now cached
+
+
+def test_repo_root_cache_is_single_flight(monkeypatch):
+    # Concurrent identical probes share one git invocation (gateway long handlers
+    # run on worker threads).
+    import threading
+
+    from tui_gateway import git_probe
+
+    git_probe.invalidate()
+    calls = {"n": 0}
+    started = threading.Event()
+
+    def slow(_cwd, *_a):
+        calls["n"] += 1
+        started.set()
+        time = __import__("time")
+        time.sleep(0.05)
+        return "/repo"
+
+    monkeypatch.setattr(git_probe, "run_git", slow)
+    out: list[str] = []
+    threads = [threading.Thread(target=lambda: out.append(git_probe.repo_root("/repo/x"))) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert out == ["/repo"] * 6
+    assert calls["n"] == 1
 
 
 def test_create_list_roundtrip(tmp_path):

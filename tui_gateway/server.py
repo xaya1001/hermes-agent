@@ -25,6 +25,7 @@ from hermes_constants import (
 )
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
+from tui_gateway import git_probe
 from tui_gateway.transport import (
     StdioTransport,
     Transport,
@@ -1120,97 +1121,14 @@ def _terminal_task_cwd(session: dict | None) -> str:
     return _session_cwd(session)
 
 
-def _git(cwd: str, *args: str) -> str:
-    """``git -C <cwd> <args>`` → stripped stdout, or ``""`` on any failure."""
-    if not cwd:
-        return ""
-    try:
-        result = subprocess.run(
-            ["git", "-C", cwd, *args],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
-        return ""
-
-
-def _git_branch_for_cwd(cwd: str) -> str:
-    return _git(cwd, "branch", "--show-current") or _git(cwd, "rev-parse", "--short", "HEAD")
-
-
-_repo_root_cache: dict[str, str] = {}
-
-
-def _git_repo_root_for_cwd(cwd: str) -> str:
-    """Top-level git repo root for ``cwd`` (``""`` when not a repo). Cached.
-
-    Runs where the gateway runs, so it resolves repos for both local and remote
-    backends — unlike the desktop's electron probe, which only sees the local fs.
-    """
-    if not cwd:
-        return ""
-    cached = _repo_root_cache.get(cwd)
-    if cached:
-        return cached
-    # Only cache hits: a non-repo cwd may become one (e.g. we `git init` a new
-    # project's folder on first worktree), and a cached "" would freeze it as
-    # not-a-repo, mislabelling its main lane by the dir basename.
-    root = _git(cwd, "rev-parse", "--show-toplevel")
-    if root:
-        _repo_root_cache[cwd] = root
-    return root
-
-
-_common_root_cache: dict[str, str] = {}
-
-
-def _git_common_repo_root_for_cwd(cwd: str) -> str:
-    """The MAIN (common) repo root for ``cwd``, folding linked worktrees.
-
-    ``git rev-parse --show-toplevel`` returns a linked worktree's OWN root, so
-    grouping by it splits every worktree into a separate "repo". The common
-    ``.git`` directory (``--git-common-dir``) is shared by a repo and all its
-    worktrees, so its parent is the one true repo root. Cached. Falls back to
-    the show-toplevel root when the common-dir probe is unavailable.
-    """
-    if not cwd:
-        return ""
-    cached = _common_root_cache.get(cwd)
-    if cached:
-        return cached
-
-    root = ""
-    gitdir = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    if gitdir:
-        gitdir = os.path.realpath(gitdir)
-        if os.path.basename(gitdir) == ".git":
-            root = os.path.dirname(gitdir)
-
-    # Cache hits only (see _git_repo_root_for_cwd): never freeze a not-yet-repo.
-    resolved = root or _git_repo_root_for_cwd(cwd)
-    if resolved:
-        _common_root_cache[cwd] = resolved
-    return resolved
-
-
-def _resolve_cwd_git(cwd: str) -> dict | None:
-    """Inject-able resolver for ``project_tree.build_tree``.
-
-    Returns ``{"repo_root": <common root>, "worktree_root": <this checkout>}``
-    or ``None`` when ``cwd`` is not in a git repo. ``build_tree`` treats
-    ``worktree_root == repo_root`` as the main checkout.
-    """
-    worktree_root = _git_repo_root_for_cwd(cwd)
-    if not worktree_root:
-        return None
-    return {
-        "repo_root": _git_common_repo_root_for_cwd(cwd) or worktree_root,
-        "worktree_root": worktree_root,
-    }
+# Git working-tree probing (run git, resolve roots, fold worktrees) lives in a
+# focused, single-flight-cached module; these stay as the in-server names every
+# call site already uses.
+_git = git_probe.run_git
+_git_branch_for_cwd = git_probe.branch
+_git_repo_root_for_cwd = git_probe.repo_root
+_git_common_repo_root_for_cwd = git_probe.common_repo_root
+_resolve_cwd_git = git_probe.resolve
 
 
 def _session_cwd(session: dict | None) -> str:
