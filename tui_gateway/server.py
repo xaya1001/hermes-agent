@@ -1153,9 +1153,16 @@ def _git_repo_root_for_cwd(cwd: str) -> str:
     """
     if not cwd:
         return ""
-    if cwd not in _repo_root_cache:
-        _repo_root_cache[cwd] = _git(cwd, "rev-parse", "--show-toplevel")
-    return _repo_root_cache[cwd]
+    cached = _repo_root_cache.get(cwd)
+    if cached:
+        return cached
+    # Only cache hits: a non-repo cwd may become one (e.g. we `git init` a new
+    # project's folder on first worktree), and a cached "" would freeze it as
+    # not-a-repo, mislabelling its main lane by the dir basename.
+    root = _git(cwd, "rev-parse", "--show-toplevel")
+    if root:
+        _repo_root_cache[cwd] = root
+    return root
 
 
 _common_root_cache: dict[str, str] = {}
@@ -1172,8 +1179,9 @@ def _git_common_repo_root_for_cwd(cwd: str) -> str:
     """
     if not cwd:
         return ""
-    if cwd in _common_root_cache:
-        return _common_root_cache[cwd]
+    cached = _common_root_cache.get(cwd)
+    if cached:
+        return cached
 
     root = ""
     gitdir = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -1182,8 +1190,11 @@ def _git_common_repo_root_for_cwd(cwd: str) -> str:
         if os.path.basename(gitdir) == ".git":
             root = os.path.dirname(gitdir)
 
-    _common_root_cache[cwd] = root or _git_repo_root_for_cwd(cwd)
-    return _common_root_cache[cwd]
+    # Cache hits only (see _git_repo_root_for_cwd): never freeze a not-yet-repo.
+    resolved = root or _git_repo_root_for_cwd(cwd)
+    if resolved:
+        _common_root_cache[cwd] = resolved
+    return resolved
 
 
 def _resolve_cwd_git(cwd: str) -> dict | None:

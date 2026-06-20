@@ -38,6 +38,21 @@ def test_for_cwd_is_a_long_handler():
     assert "projects.for_cwd" in server._LONG_HANDLERS
 
 
+def test_repo_root_cache_does_not_freeze_a_not_yet_repo(monkeypatch):
+    # We `git init` a new project's folder on first worktree; the cache must not
+    # have frozen the pre-init "" result, or the main lane mislabels by basename.
+    cwd = "/tmp/baby pics"
+    server._repo_root_cache.clear()
+    state = {"root": ""}  # flips once the folder becomes a repo
+    monkeypatch.setattr(server, "_git", lambda c, *a: state["root"] if c == cwd else "")
+
+    assert server._git_repo_root_for_cwd(cwd) == ""  # pre-init: not a repo (uncached)
+
+    state["root"] = cwd  # `git init` happened
+    assert server._git_repo_root_for_cwd(cwd) == cwd  # re-probed, not frozen
+    assert server._git_repo_root_for_cwd(cwd) == cwd  # now cached
+
+
 def test_create_list_roundtrip(tmp_path):
     created = _call("projects.create", {"name": "Demo", "folders": [str(tmp_path)], "use": True})
     assert created["project"]["slug"] == "demo"
